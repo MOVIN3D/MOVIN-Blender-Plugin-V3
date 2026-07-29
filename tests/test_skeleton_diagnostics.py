@@ -649,31 +649,39 @@ class RestRelativeLocationTests(unittest.TestCase):
 
 
 class HipsLocationTests(unittest.TestCase):
-    """The hips takes the same code path, with the performer's standing height as
-    its reference instead of a parent-relative offset."""
+    """The hips takes the same code path with a different reference.
 
-    PERFORMER_HIPS_HEIGHT = 0.87   # metres; the property stores this negated
+    There is no parent-relative offset for a world position, so Hips Height
+    Offset stands in for one. It is a value the user tunes until the character
+    stands at the right height - not a measurement of anything the add-on knows.
+    What matters is only that the streamed height is measured against it.
+    """
+
+    #: The streamed height the offset below cancels out - the pose the user tuned
+    #: it for. Named for what it does here, not for what it might mean upstream.
+    REFERENCE_HEIGHT = 0.87
+
+    #: Hips Height Offset, as the property stores it: added to streamed height.
+    HIPS_Y_OFFSET = -REFERENCE_HEIGHT
 
     def hips_location(self, streamed_metres, units_per_metre, axes=IDENTITY_AXES):
-        hips_y_offset = -self.PERFORMER_HIPS_HEIGHT
         return movin.rest_relative_location(
             tuple(component * units_per_metre for component in streamed_metres),
-            (0.0, -hips_y_offset * units_per_metre, 0.0),
+            (0.0, -self.HIPS_Y_OFFSET * units_per_metre, 0.0),
             axes)
 
-    def test_standing_still_leaves_the_armature_at_its_own_hips_height(self):
-        # At the performer's standing height the hips must not be displaced, so
-        # the character sits at whatever height its own rest pose puts it - not
-        # at the performer's.
+    def test_the_tuned_pose_leaves_the_armature_at_its_own_hips_height(self):
+        # At the height the offset was tuned for, the hips must not be displaced,
+        # so the character sits where its own rest pose puts it.
         for units_per_metre in (1.0, 100.0):
             location = self.hips_location(
-                (0.0, self.PERFORMER_HIPS_HEIGHT, 0.0), units_per_metre)
+                (0.0, self.REFERENCE_HEIGHT, 0.0), units_per_metre)
             for component in location:
                 self.assertAlmostEqual(component, 0.0, places=9)
 
-    def test_only_the_movement_away_from_standing_is_transferred(self):
+    def test_only_the_movement_away_from_that_pose_is_transferred(self):
         # A 12 cm crouch is a 12 cm crouch on any rig, in that rig's units.
-        crouch = self.PERFORMER_HIPS_HEIGHT - 0.12
+        crouch = self.REFERENCE_HEIGHT - 0.12
 
         metre_rig = self.hips_location((0.0, crouch, 0.0), 1.0)
         self.assertAlmostEqual(metre_rig[1], -0.12, places=9)
@@ -682,9 +690,9 @@ class HipsLocationTests(unittest.TestCase):
         centimetre_rig = self.hips_location((0.0, crouch, 0.0), 100.0)
         self.assertAlmostEqual(centimetre_rig[1], -12.0, places=6)
 
-    def test_horizontal_movement_has_no_reference_to_subtract(self):
+    def test_the_offset_only_applies_to_height(self):
         location = self.hips_location(
-            (1.5, self.PERFORMER_HIPS_HEIGHT, -0.4), 1.0)
+            (1.5, self.REFERENCE_HEIGHT, -0.4), 1.0)
         self.assertAlmostEqual(location[0], 1.5, places=9)
         self.assertAlmostEqual(location[1], 0.0, places=9)
         self.assertAlmostEqual(location[2], -0.4, places=9)
@@ -696,12 +704,12 @@ class HipsLocationTests(unittest.TestCase):
         self.assertAlmostEqual(crouch_delta * 100.0, -12.0, places=9)
         # Derived instead, the same motion stays 12 cm.
         self.assertAlmostEqual(
-            self.hips_location((0.0, self.PERFORMER_HIPS_HEIGHT + crouch_delta, 0.0), 1.0)[1],
+            self.hips_location((0.0, self.REFERENCE_HEIGHT + crouch_delta, 0.0), 1.0)[1],
             crouch_delta, places=9)
 
     def test_the_result_is_projected_into_the_hips_rest_axes(self):
         location = self.hips_location(
-            (0.0, self.PERFORMER_HIPS_HEIGHT + 0.1, 0.0), 1.0, axes=TILTED_AXES)
+            (0.0, self.REFERENCE_HEIGHT + 0.1, 0.0), 1.0, axes=TILTED_AXES)
         self.assertAlmostEqual(location[1], 0.1 * 0.9998, places=9)
         self.assertAlmostEqual(location[2], 0.1 * -0.0183, places=9)
 

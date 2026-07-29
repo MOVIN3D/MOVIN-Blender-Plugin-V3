@@ -746,12 +746,14 @@ class MOVIN_Props(PropertyGroup):
         default="Hips"
     )
     hips_y_offset: FloatProperty(
-        name="Performer Hips Height (m)",
+        name="Hips Height Offset (m)",
         description=(
-            "The performer's standing hips height in metres, negated. Streamed hips "
-            "height is measured against this, so only the movement away from standing "
-            "is transferred and the armature keeps its own hips height. The scale "
-            "itself is derived from the armature, not set here"
+            "Vertical offset in metres, added to the streamed hips height before it is "
+            "applied. The streamed height is the performer's, measured from wherever "
+            "MOVIN Studio's origin sits, so it does not line up with this armature's "
+            "hips on its own. Tune it until the character stands at the right height; "
+            "from there only the movement away from that pose is transferred. The scale "
+            "is derived from the armature and is not set here"
         ),
         default=-0.87
     )
@@ -1469,15 +1471,19 @@ def _apply_latest_stream_data(scene_name):
 
             if name == hips_bone_name:
                 # The hips translation is a world position rather than a bone
-                # length, so its reference is the performer's own standing
-                # height (hips_y_offset) instead of a parent-relative offset.
-                # Subtracting it leaves the vertical motion, which is then added
-                # to whatever height this armature's rest pose puts its hips at -
-                # so the character keeps its own proportions.
+                # length, so there is no parent-relative offset to measure it
+                # against. hips_y_offset stands in as the reference height: what
+                # is left after it is the movement away from the pose it was tuned
+                # for, applied on top of wherever this armature's rest pose puts
+                # its hips - so the character keeps its own height.
                 #
-                # The scale is derived, not dialled in. The old fixed x100 was
-                # right only for a centimetre-authored rig and overshot a
-                # metre-authored one by a hundred times.
+                # Whether that reference happens to equal the performer's standing
+                # height is not something the add-on can know; it is a value the
+                # user dials until the character stands right.
+                #
+                # The scale, by contrast, is derived rather than dialled. The old
+                # fixed x100 was right only for a centimetre-authored rig and
+                # overshot a metre-authored one by a hundred times.
                 if rest_frame is not None:
                     pb.location = rest_relative_location(
                         streamed_units,

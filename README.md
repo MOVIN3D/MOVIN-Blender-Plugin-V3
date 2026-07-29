@@ -48,60 +48,36 @@ It is set up for Blender 4.3.2 or newer and includes sample assets for quick tes
 
 ## Usage
 
-For correct motion transfer, the same `.fbx` character model should be loaded in both MOVIN Studio and Blender.
-
-MOVIN Studio sends position values in meters, while bone data lives in the
-armature's own units. The two are related by the armature object's scale and
-`Scene > Units > Unit Scale`, so the factor differs per rig:
-
-| Rig | Armature object scale | Armature units per streamed metre |
-| --- | --- | --- |
-| `MOVINman_V3_Sample` (authored in metres) | 1.0 | 1 |
-| `Ch14_Sample` (authored in centimetres) | 0.01 | 100 |
-
-The add-on derives this factor from the rig, for the hips as well as for every
-other bone, so there is no scale to dial in.
-
-The one value still set by hand is `Performer Hips Height (m)`, defaulting to
-`-0.87`: the performer's standing hips height, negated. Streamed hips height is
-measured against it, so only the movement away from standing is transferred and
-the armature keeps its own hips height. Set it to the performer's actual standing
-hips height if the character floats or sinks.
-
-### Bone offsets and connected bones
-
-Each bone's streamed offset is applied against the armature's **rest pose** - the
-`.fbx`'s own value - so the result does not depend on which frame arrived first
-and needs no baseline to reset. A Character stream is already retargeted onto the
-same `.fbx`, so its offsets equal the rest offsets and nothing is displaced;
-an Actor stream carries the performer's proportions and does displace the joints.
-
-Both sides are taken in the **parent bone's rest frame**, which is the frame
-Blender's pose evaluation works in:
-
-```text
-pose = parent_pose @ (parent_rest^-1 @ rest) @ basis
-```
-
-Using the bone's own axes and an armature-space offset instead is a different
-quantity. It looks fine on bones that sit near the armature axes and is badly
-wrong elsewhere - MOVINman's bones average 12 degrees off with thumbs at 60, and
-Ch14's average 116 degrees, which is why fingers were the first thing to break.
-
-Blender locks the location channel of a bone with `Connected` set, so an offset
-written to one goes nowhere. `MOVINman_V3_Sample` had 6, including `Neck` and
-`Neck1` - the two largest deviations in practice - so `Connected` has been cleared
-on that rig; clearing it moves nothing, it only stops each head being pinned to
-its parent's tail. `Ch14_Sample` keeps its 5, which come from the `.fbx` itself
-and would return on any re-import. The add-on notes blocked bones in the console
-once per session, and only when the stream actually carries an offset being
-dropped - a Character stream stays quiet.
-
 1. Open the `MOVIN Live` tab in the 3D Viewport side panel
 2. Select the target armature and click `Use Active Armature`
 3. Set the OSC port if needed
 4. Enable `Visualize Point Cloud` if you want point cloud preview
 5. Click `Start`
+
+For correct motion transfer, the same `.fbx` character model should be loaded in both MOVIN Studio and Blender.
+
+### Hips Height Offset
+
+The one setting you normally need to touch, defaulting to `-0.87` metres. The
+streamed hips height is the performer's, measured from wherever MOVIN Studio's
+origin sits, so it does not line up with your armature's hips on its own. This
+offset is added to it before it is applied.
+
+Tune it until the character stands at the right height - raise it if the character
+sinks into the floor, lower it if it floats. From there only the movement away
+from that pose is transferred, so the armature keeps its own hips height.
+
+Everything else scales itself. Streamed metres are converted using a factor read
+from the armature object's scale and `Scene > Units > Unit Scale`, which is why
+the old `Hips Translational Scale` and `Bone Local Position Scale` settings are
+gone as of 1.1.0.
+
+### If a bone does not follow the stream
+
+Blender locks the location channel of a bone that has `Connected` set, so the
+streamed bone offset cannot reach it. The add-on lists any affected bones in the
+console once per session; clear `Connected` on them in Edit Mode if you need those
+offsets applied. Clearing it does not move anything.
 
 ## Skeleton Calibration Offset
 
@@ -133,33 +109,28 @@ retarget the take onto your own rig.
 
 Notes:
 
-- Character streams are never reported on, only Actor streams.
-- Nothing is shown for the first 30 frames, while the add-on works out which
-  bones carry world movement rather than a bone length.
-- The comparison is normalised to metres through the armature object's scale and
-  `Scene > Units > Unit Scale`. If those cannot be reconciled the report is
-  suppressed and the reason logged to the console rather than reporting every
-  bone at 100x.
-- `Print Status` dumps the diagnostic state, including the computed signature and
-  the bones excluded as world movement.
+- Only Actor streams are reported on. A Character stream matches your armature
+  by definition, so there is nothing to say about it.
+- Nothing appears for the first few seconds of a stream, while the add-on works
+  out which bones carry world movement rather than a bone length.
+- `Print Status` prints the full diagnostic state to the console.
 
 ## Tests
 
-The comparison logic is pure Python and runs without Blender:
+The comparison logic is pure Python and runs without Blender. `mutation_check.py`
+re-introduces each bug the suite guards against and confirms the tests still catch
+it:
 
 ```bash
 python tests/test_skeleton_diagnostics.py
 ```
 
-Every trap the suite guards against can be put back, to confirm the tests still
-catch it. A test that cannot fail is not protecting anything:
-
 ```bash
 python tests/mutation_check.py
 ```
 
-The rest needs a real rig, because a pure test can only confirm the code agrees
-with itself. Run each against both sample scenes; they exit non-zero on failure:
+The rest needs a real rig. Run each against both sample scenes; they exit
+non-zero on failure:
 
 ```bash
 blender -b samples/blend/MOVINman_V3_Sample.blend --python tests/blender/verify_apply.py
@@ -169,11 +140,7 @@ blender -b samples/blend/MOVINman_V3_Sample.blend --python tests/blender/verify_
 blender -b samples/blend/MOVINman_V3_Sample.blend --python tests/blender/verify_diagnostics.py
 ```
 
-`verify_apply.py` checks streamed transforms against Blender's own pose evaluator,
-including one deliberately frame-independent assertion: stream an offset at 1.20x
-and the joint must sit 1.20x as far from its parent, whatever coordinate frame the
-streamed vector turns out to be in. `verify_diagnostics.py` drives the notice end
-to end, mostly to prove it does not come back on its own.
+Each script's docstring explains what it covers and why it exists.
 
 ## OSC Formats
 

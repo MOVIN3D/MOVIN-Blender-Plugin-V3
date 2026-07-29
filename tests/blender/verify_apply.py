@@ -25,8 +25,8 @@ import bpy                                         # noqa: E402
 from mathutils import Vector                       # noqa: E402
 import _harness                                    # noqa: E402
 
-#: The performer's standing hips height the hips reference is set to for the test.
-PERFORMER_HIPS_HEIGHT = 0.87
+#: The streamed hips height that Hips Height Offset is tuned to cancel out.
+REFERENCE_HIPS_HEIGHT = 0.87
 
 #: Ratio used for the magnitude checks.
 CALIBRATION_RATIO = 1.20
@@ -39,7 +39,7 @@ def main():
     arm = _harness.single_armature()
 
     props.armature_name = arm.name
-    props.hips_y_offset = -PERFORMER_HIPS_HEIGHT
+    props.hips_y_offset = -REFERENCE_HIPS_HEIGHT
     arm.data.pose_position = 'POSE'
 
     units_per_metre = movin.armature_units_per_metre(
@@ -66,7 +66,7 @@ def main():
         bpy.context.view_layer.update()
         return arm.pose.bones[name].matrix.to_translation().copy()
 
-    def send(offset_ratio, hips_height=PERFORMER_HIPS_HEIGHT, capture=False):
+    def send(offset_ratio, hips_height=REFERENCE_HIPS_HEIGHT, capture=False):
         """Stream every bone's own rest offset, scaled, plus a hips height."""
         payload = [_bone(hips, (0.0, hips_height, 0.0))]
         for name in bones:
@@ -162,21 +162,21 @@ def main():
         assert drift < 1e-5, "fingers moved on a matching stream"
         print("    OK: fingers hold still")
 
-    # -- 5. Hips: derived scale, performer height as the reference.
+    # -- 5. Hips: derived scale, Hips Height Offset as the reference.
     reset_pose()
     rest_hips = head(hips)
-    print("\n[5] hips %r, performer standing height %.2f m" % (hips, PERFORMER_HIPS_HEIGHT))
+    print("\n[5] hips %r, reference height %.2f m" % (hips, REFERENCE_HIPS_HEIGHT))
 
     # Displace it first, so "no drift" cannot pass just because nothing was applied.
     arm.pose.bones[hips].location = (0.5, 0.5, 0.5)
     assert (head(hips) - rest_hips).length > 1e-6
-    send(1.0, hips_height=PERFORMER_HIPS_HEIGHT)
+    send(1.0, hips_height=REFERENCE_HIPS_HEIGHT)
     returned = (head(hips) - rest_hips).length
-    print("    standing at the reference height -> drift %.3e (from a displaced start)" % returned)
-    assert returned < 1e-5, "standing still did not return the hips to its own rest height"
+    print("    at the reference height -> drift %.3e (from a displaced start)" % returned)
+    assert returned < 1e-5, "the reference height did not return the hips to its own rest height"
 
     reset_pose()
-    send(1.0, hips_height=PERFORMER_HIPS_HEIGHT - 0.12)
+    send(1.0, hips_height=REFERENCE_HIPS_HEIGHT - 0.12)
     moved = (head(hips) - rest_hips).length
     expected = 0.12 * units_per_metre
     print("    12 cm crouch -> %.5f armature units, expected %.5f" % (moved, expected))
