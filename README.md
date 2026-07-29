@@ -25,7 +25,7 @@ streams. Needs Blender 4.3.2 or newer; sample scenes are included.
 - `samples/fbx/Ch14_nonPBR.fbx`  
   Sample character FBX
 - `tests/`  
-  Unit tests, a mutation check, and checks that drive a real rig - see [Tests](#tests)
+  Tests for the add-on itself, not needed to use it - see [tests/README.md](tests/README.md)
 
 ## Installation
 
@@ -126,34 +126,6 @@ Header:
 Per-point payload:
 
 `[x, y, z]`
-
-## Tests
-
-The comparison logic is pure Python and runs without Blender:
-
-```bash
-python tests/test_skeleton_diagnostics.py
-```
-
-`mutation_check.py` re-introduces each bug the suite guards against and confirms
-the tests still catch it:
-
-```bash
-python tests/mutation_check.py
-```
-
-The rest needs a real rig. Run each against both sample scenes; they exit
-non-zero on failure:
-
-```bash
-blender -b samples/blend/MOVINman_V3_Sample.blend --python tests/blender/verify_apply.py
-```
-
-```bash
-blender -b samples/blend/MOVINman_V3_Sample.blend --python tests/blender/verify_diagnostics.py
-```
-
-Each script's docstring explains what it covers and why it exists.
 
 ## License
 
