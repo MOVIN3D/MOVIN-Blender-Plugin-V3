@@ -1,23 +1,16 @@
 # MOVIN Blender Plugin
 
-Blender add-on for receiving and previewing live MOVIN motion and point cloud OSC streams.
-
-This add-on lets you preview MOVIN data directly in Blender by:
-
-- driving a selected armature from `/MOVIN/Frame`
-- visualizing `/MOVIN/PointCloud` in the viewport
-
-It is set up for Blender 4.3.2 or newer and includes sample assets for quick testing.
+Blender add-on for receiving and previewing live MOVIN motion and point cloud OSC
+streams. Needs Blender 4.3.2 or newer; sample scenes are included.
 
 ## Highlights
 
-- Live armature retargeting by bone name
-- Live point cloud preview in Blender
-- Bone offsets and hips translation scaled from the rig, with nothing to dial in
-- Skeleton Calibration Offset notice, so an Actor stream's proportions are
-  explained rather than mistaken for a bug
+- Live armature retargeting by bone name, from `/MOVIN/Frame`
+- Live point cloud preview, from `/MOVIN/PointCloud`
+- Nothing to scale by hand - bone and hips translation are read from the rig
+- A panel notice explaining an Actor stream's proportions, so they are not
+  mistaken for a bug
 - Simple N-panel workflow
-- Sample `.blend` and `.fbx` files included
 
 ## Repository Contents
 
@@ -31,12 +24,8 @@ It is set up for Blender 4.3.2 or newer and includes sample assets for quick tes
   MOVINman V3 source FBX
 - `samples/fbx/Ch14_nonPBR.fbx`  
   Sample character FBX
-- `tests/test_skeleton_diagnostics.py`  
-  Unit tests for the comparison logic; runs without Blender
-- `tests/mutation_check.py`  
-  Puts each known trap back and confirms the tests catch it
-- `tests/blender/`  
-  Checks that need a real rig, run through `blender -b`
+- `tests/`  
+  Unit tests, a mutation check, and checks that drive a real rig - see [Tests](#tests)
 
 ## Installation
 
@@ -48,13 +37,14 @@ It is set up for Blender 4.3.2 or newer and includes sample assets for quick tes
 
 ## Usage
 
+For correct motion transfer, the same `.fbx` character model should be loaded in
+both MOVIN Studio and Blender.
+
 1. Open the `MOVIN Live` tab in the 3D Viewport side panel
 2. Select the target armature and click `Use Active Armature`
 3. Set the OSC port if needed
 4. Enable `Visualize Point Cloud` if you want point cloud preview
 5. Click `Start`
-
-For correct motion transfer, the same `.fbx` character model should be loaded in both MOVIN Studio and Blender.
 
 ### Hips Height Offset
 
@@ -115,33 +105,6 @@ Notes:
   out which bones carry world movement rather than a bone length.
 - `Print Status` prints the full diagnostic state to the console.
 
-## Tests
-
-The comparison logic is pure Python and runs without Blender. `mutation_check.py`
-re-introduces each bug the suite guards against and confirms the tests still catch
-it:
-
-```bash
-python tests/test_skeleton_diagnostics.py
-```
-
-```bash
-python tests/mutation_check.py
-```
-
-The rest needs a real rig. Run each against both sample scenes; they exit
-non-zero on failure:
-
-```bash
-blender -b samples/blend/MOVINman_V3_Sample.blend --python tests/blender/verify_apply.py
-```
-
-```bash
-blender -b samples/blend/MOVINman_V3_Sample.blend --python tests/blender/verify_diagnostics.py
-```
-
-Each script's docstring explains what it covers and why it exists.
-
 ## OSC Formats
 
 ### `/MOVIN/Frame`
@@ -164,33 +127,34 @@ Per-point payload:
 
 `[x, y, z]`
 
-## Project Structure
+## Tests
 
-```text
-MOVIN_Blender/
-|- addon/
-|  `- movin_blender_plugin.py
-|- samples/
-|  |- blend/
-|  |  |- MOVINman_V3_Sample.blend
-|  |  `- Ch14_Sample.blend
-|  `- fbx/
-|     |- MOVINman_V3_Puppet.fbx
-|     `- Ch14_nonPBR.fbx
-|- tests/
-|  |- test_skeleton_diagnostics.py
-|  |- mutation_check.py
-|  `- blender/
-|     |- _harness.py
-|     |- verify_apply.py
-|     `- verify_diagnostics.py
-|- .gitignore
-`- README.md
+The comparison logic is pure Python and runs without Blender:
+
+```bash
+python tests/test_skeleton_diagnostics.py
 ```
 
-## Recommended Blender Version
+`mutation_check.py` re-introduces each bug the suite guards against and confirms
+the tests still catch it:
 
-- Blender 4.3.2 or newer
+```bash
+python tests/mutation_check.py
+```
+
+The rest needs a real rig. Run each against both sample scenes; they exit
+non-zero on failure:
+
+```bash
+blender -b samples/blend/MOVINman_V3_Sample.blend --python tests/blender/verify_apply.py
+```
+
+```bash
+blender -b samples/blend/MOVINman_V3_Sample.blend --python tests/blender/verify_diagnostics.py
+```
+
+Each script's docstring explains what it covers and why it exists.
 
 ## License
+
 Copyright 2025 MOVIN. All Rights Reserved.
