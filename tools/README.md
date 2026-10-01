@@ -44,6 +44,8 @@ Install the plugin ZIP in an isolated Blender user directory, and repeat the
 sample tests from the extracted samples ZIP before publishing.
 
 Before publication, commit the reviewed release sources and sample files, then
-tag that commit `v<version>` and upload these four artifacts. The original
-release is tagged `v3.0.0` (formerly `v1.0.0`). Record the Blender versions actually tested;
-do not treat the declared minimum as a successful compatibility test.
+tag that commit `v<version>` and upload these four artifacts. The legacy
+`v3.0.0` tag (formerly `v1.0.0`) was withdrawn; distribute 3.3.0 or newer.
+Its separate Git history was preserved in a local bundle before removal.
+Record the Blender versions actually tested; do not treat the declared minimum
+as a successful compatibility test.

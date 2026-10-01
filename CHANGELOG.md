@@ -3,7 +3,8 @@
 ## 3.3.0 — 2026-10-01
 
 Align the plugin version with MOVIN Studio 3.3.0. The development add-on was
-labeled 1.1.0. The earlier `v1.0.0` tag has been renamed to `v3.0.0`.
+labeled 1.1.0. This is the recommended release; the legacy `v3.0.0` tag
+(formerly `v1.0.0`) has been withdrawn.
 
 - Add Studio status replies for the selected Armature, bone mapping, and
   received/applied motion and received point cloud FPS.
@@ -25,9 +26,9 @@ Validated on Blender 5.2.2 LTS. The add-on retains the declared 4.3.2 minimum,
 but this release has not been retested on older Blender versions. Prepared
 `.blend` scenes are saved in 5.2.2; FBX samples are included for other versions.
 
-## 3.0.0 — tag renamed 2026-10-01
+## 3.0.0 — withdrawn 2026-10-01
 
-- Rename the original `v1.0.0` tag to `v3.0.0` to align the release family with
-  the other MOVIN plugins.
-- Keep the original source commit unchanged. This is a tag rename; the older
-  source files retain their original version metadata.
+- The original `v1.0.0` tag was renamed to `v3.0.0`, then removed from public
+  distribution because it contains known receiver issues fixed in 3.3.0.
+- Use 3.3.0. The legacy Git history was archived before removing the tag;
+  no source history was rewritten.
