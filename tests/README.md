@@ -2,7 +2,7 @@
 
 Nothing here is needed to use the add-on. This is for whoever changes it next.
 
-Run all four before touching the transform maths or the calibration notice.
+Run these checks before touching the transform maths or the calibration notice.
 
 ## Without Blender
 
@@ -11,6 +11,7 @@ and `mathutils` so the add-on imports outside Blender:
 
 ```bash
 python tests/test_skeleton_diagnostics.py
+python tests/test_receiver.py
 ```
 
 `mutation_check.py` puts each bug the suite guards against back in and confirms
@@ -40,7 +41,18 @@ blender -b samples/blend/Ch14_Sample.blend --python tests/blender/verify_apply.p
 
 `verify_apply.py` checks streamed transforms against Blender's own pose
 evaluator: a matching stream must leave the pose untouched, connected bones must
-not move, and the hips must return to its own rest height.
+not move, and the hips must reach the streamed world position.
+
+```bash
+blender -b samples/blend/MOVINman_V3_Sample.blend --python tests/blender/verify_global_hips.py
+blender -b samples/blend/Ch14_Sample.blend --python tests/blender/verify_global_hips.py
+```
+
+`verify_global_hips.py` exercises the production application loop with translated,
+rotated, scaled and parented Armatures, scene unit changes, and source parent
+transforms. It also checks a parented hips bone while its parent changes in the
+same frame, legacy saved offsets, and rejection of connected hips. Expected
+positions are measured in world metres through Blender's pose evaluator.
 
 ```bash
 blender -b samples/blend/MOVINman_V3_Sample.blend --python tests/blender/verify_diagnostics.py
@@ -74,3 +86,38 @@ is an Actor rig at metre scale with no connected bones; `Ch14_Sample` is a
 Character rig at 0.01 object scale whose bones average 116 degrees off the
 armature axes and which keeps 5 connected bones. Bugs that hide on one show up
 on the other.
+
+`verify_sample.py` checks the saved release defaults: matching Armature and Hips
+selection, a clean pose, no active animation or captured cloud, no legacy Hips
+settings, packed textures, and a stopped receiver. Run it against both scenes
+after preparing them with `tools/prepare_sample.py`.
+
+Run `tests/blender/verify_receiver.py` against both samples as well. It opens real
+UDP sockets and checks Start/Stop cleanup, occupied ports, saved running state,
+file-load and add-on-disable cleanup, missing FBX root translation, and status
+replies. It also checks ordered motion application, the two-frame queue limit,
+and discarding poses older than 50 ms. All test ports are temporary; the sample
+files are not saved.
+
+`test_receiver.py` covers packet validation, interleaved and reordered frames,
+sender isolation, index restart, bounded partial buffers, and removal of the
+network file-writing commands. These tests do not replace live visual checks of
+a Studio stream on the supported Blender versions.
+
+## Performance comparison
+
+```bash
+blender --factory-startup --disable-autoexec -b samples/blend/Ch14_Sample.blend --python-exit-code 1 --python tests/blender/benchmark_stream.py
+```
+
+The benchmark sends full motion plus 0, 1,500, and 15,000 points at 60 FPS over
+real UDP from a separate Python process. It reports received/applied FPS and main
+thread work time after warmup. Append `-- --baseline path/to/older_addon.py` to
+measure an older implementation with the same fixture. Run comparisons
+sequentially to avoid CPU contention. Ports are temporary and scenes are not
+saved. This measures headless reception and pose/geometry evaluation; viewport
+rendering and the user's scene can add further costs.
+
+Append `--ui-work-ms 8` after `--` to simulate an additional 8 ms of UI work
+between callbacks. This exposes extra timer delays without claiming to measure
+the real viewport. The output labels this simulated cost explicitly.

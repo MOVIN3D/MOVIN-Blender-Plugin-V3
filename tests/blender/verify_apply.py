@@ -17,6 +17,7 @@ coordinate frame the streamed vector turns out to be in.
 """
 
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -24,9 +25,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import bpy                                         # noqa: E402
 from mathutils import Vector                       # noqa: E402
 import _harness                                    # noqa: E402
-
-#: The streamed hips height that Hips Height Offset is tuned to cancel out.
-REFERENCE_HIPS_HEIGHT = 0.87
 
 #: Ratio used for the magnitude checks.
 CALIBRATION_RATIO = 1.20
@@ -39,7 +37,6 @@ def main():
     arm = _harness.single_armature()
 
     props.armature_name = arm.name
-    props.hips_y_offset = -REFERENCE_HIPS_HEIGHT
     arm.data.pose_position = 'POSE'
 
     units_per_metre = movin.armature_units_per_metre(
@@ -48,6 +45,7 @@ def main():
 
     hips = next(name for name, f in rest_frames.items() if f["offset"] is None)
     props.hips_bone_name = hips
+    rest_hips_world = (arm.matrix_world @ arm.data.bones[hips].head_local) * scene.unit_settings.scale_length
     bones = [name for name, f in rest_frames.items() if f["offset"] is not None]
     connected = [n for n in bones if arm.data.bones[n].use_connect]
 
@@ -66,18 +64,25 @@ def main():
         bpy.context.view_layer.update()
         return arm.pose.bones[name].matrix.to_translation().copy()
 
-    def send(offset_ratio, hips_height=REFERENCE_HIPS_HEIGHT, capture=False):
-        """Stream every bone's own rest offset, scaled, plus a hips height."""
-        payload = [_bone(hips, (0.0, hips_height, 0.0))]
+    def send(offset_ratio, hips_world, capture):
+        """Stream local bone offsets and a hips world point in metres."""
+        root = _bone(hips, (0.0, 0.0, 0.0))
+        root["p"] = (-hips_world.x, hips_world.z, -hips_world.y)
+        payload = [root]
         for name in bones:
             ox, oy, oz = rest_frames[name]["offset"]
             payload.append(_bone(name, (ox * offset_ratio / units_per_metre,
                                         oy * offset_ratio / units_per_metre,
                                         oz * offset_ratio / units_per_metre)))
+        indices = {b["bone_name"]: i for i, b in enumerate(payload)}
+        for b in payload:
+            parent = arm.data.bones[b["bone_name"]].parent
+            b["bone_index"] = indices[b["bone_name"]]
+            b["parent_index"] = indices[parent.name] if parent is not None else -1
         with movin._runtime.lock:
             movin._runtime.ready_frames.clear()
             movin._runtime.ready_frames.append(
-                {"timestamp": "t", "actor": "MOVINMan", "frame_idx": 1, "bones": payload})
+                {"timestamp": "t", "actor": "MOVINMan", "frame_idx": 1, "received_at": time.monotonic(), "bones": payload})
         if not capture:
             movin._apply_latest_stream_data(scene.name)
             bpy.context.view_layer.update()
@@ -106,7 +111,7 @@ def main():
         for name in bones)
 
     # -- 1. A Character stream carries the rig's own offsets and must not move it.
-    send(1.0)
+    send(1.0, rest_hips_world, False)
     drift = max((head(name) - rest_heads[name]).length for name in bones)
     print("\n[1] the rig's own offsets streamed back")
     print("    largest head drift: %.3e armature units over %d bones" % (drift, len(bones)))
@@ -114,7 +119,7 @@ def main():
     print("    OK: identical to the rest pose")
 
     # -- 2. Frame-independent: 1.20x must put every joint 1.20x from its parent.
-    send(CALIBRATION_RATIO)
+    send(CALIBRATION_RATIO, rest_hips_world, False)
     worst_error, worst_name, checked = 0.0, None, 0
     for name in bones:
         if arm.data.bones[name].use_connect or rest_span[name] < 1e-6:
@@ -144,10 +149,10 @@ def main():
         # stream has nothing to lose, so it must stay quiet.
         movin._runtime.warned_connected_bones = False
         reset_pose()
-        matched = send(1.0, capture=True)
+        matched = send(1.0, rest_hips_world, True)
         movin._runtime.warned_connected_bones = False
         reset_pose()
-        differing = send(CALIBRATION_RATIO, capture=True)
+        differing = send(CALIBRATION_RATIO, rest_hips_world, True)
         assert "NOTE:" not in matched, "a matching stream produced a pointless warning"
         assert "NOTE:" in differing, "a dropped offset was not reported"
         print("    OK: the note fires only when an offset is actually dropped")
@@ -156,32 +161,33 @@ def main():
     fingers = [n for n in bones if "Hand" in n or "Thumb" in n or "Finger" in n]
     if fingers:
         reset_pose()
-        send(1.0)
+        send(1.0, rest_hips_world, False)
         drift = max((head(name) - rest_heads[name]).length for name in fingers)
         print("\n[4] %d finger bones, rig's own offsets: largest drift %.3e" % (len(fingers), drift))
         assert drift < 1e-5, "fingers moved on a matching stream"
         print("    OK: fingers hold still")
 
-    # -- 5. Hips: derived scale, Hips Height Offset as the reference.
+    # -- 5. Hips: absolute world position, independent of the previous pose.
     reset_pose()
     rest_hips = head(hips)
-    print("\n[5] hips %r, reference height %.2f m" % (hips, REFERENCE_HIPS_HEIGHT))
+    print("\n[5] hips %r, absolute world position" % hips)
 
     # Displace it first, so "no drift" cannot pass just because nothing was applied.
     arm.pose.bones[hips].location = (0.5, 0.5, 0.5)
     assert (head(hips) - rest_hips).length > 1e-6
-    send(1.0, hips_height=REFERENCE_HIPS_HEIGHT)
+    send(1.0, rest_hips_world, False)
     returned = (head(hips) - rest_hips).length
-    print("    at the reference height -> drift %.3e (from a displaced start)" % returned)
-    assert returned < 1e-5, "the reference height did not return the hips to its own rest height"
+    print("    at the streamed rest point -> drift %.3e (from a displaced start)" % returned)
+    assert returned < 1e-5, "the streamed rest point did not return the hips to its rest position"
 
     reset_pose()
-    send(1.0, hips_height=REFERENCE_HIPS_HEIGHT - 0.12)
-    moved = (head(hips) - rest_hips).length
-    expected = 0.12 * units_per_metre
-    print("    12 cm crouch -> %.5f armature units, expected %.5f" % (moved, expected))
-    assert abs(moved - expected) < 1e-4, "crouch magnitude is wrong"
-    print("    OK: scale derived from the rig, and the armature keeps its own hips height")
+    expected = rest_hips_world + Vector((0.3, -0.4, -0.12))
+    send(1.0, expected, False)
+    actual = (arm.matrix_world @ head(hips)) * scene.unit_settings.scale_length
+    error = (actual - expected).length
+    print("    translated hips world position -> error %.3e metres" % error)
+    assert error < 1e-5, "hips world position differs from the stream"
+    print("    OK: all three world coordinates match the stream")
 
     reset_pose()
 

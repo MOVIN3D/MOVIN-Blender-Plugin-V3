@@ -1,22 +1,20 @@
 bl_info = {
     "name": "MOVIN Live Receiver",
     "author": "MOVIN",
-    "version": (1, 1, 0),
+    "version": (3, 3, 0),
     "blender": (4, 3, 2),
-    "location": "View3D > N-Panel > MOVIN Live Receiver",
-    "description": "Receives /MOVIN/Frame and /MOVIN/PointCloud OSC from Unity.",
+    "location": "View3D > N-Panel > MOVIN Live",
+    "description": "Receives motion and point clouds from MOVIN Studio.",
     "category": "Animation",
 }
 
 import bpy
 from bpy.props import (
-    PointerProperty, StringProperty, IntProperty, BoolProperty, FloatProperty, EnumProperty
+    PointerProperty, StringProperty, IntProperty, BoolProperty, EnumProperty
 )
 from bpy.types import (
     PropertyGroup, Panel, Operator
 )
-from pathlib import Path
-import base64
 import socket
 import struct
 import threading
@@ -25,6 +23,7 @@ import traceback
 from collections import deque, namedtuple
 from mathutils import Quaternion, Vector
 import math
+import numpy as np
 
 # -----------------------
 # OSC Reader
@@ -44,7 +43,7 @@ class _OscReader:
             end = self.data.index(b'\x00', start)
         except ValueError:
             raise ValueError("OSC string not null-terminated")
-        s = self.data[start:end].decode('utf-8', errors='replace')
+        s = self.data[start:end].decode('utf-8', errors='strict')
         self.i = (end + 4) & ~0x03
         if self.i > self.n:
             raise ValueError("OSC string padding overflow")
@@ -75,15 +74,25 @@ class _OscReader:
             raise ValueError("OSC typetags missing ',' prefix")
         argspec = typetags[1:]
         args = []
-        for t in argspec:
-            if t == 'i':
-                args.append(self._read_int32())
-            elif t == 'f':
-                args.append(self._read_float32())
-            elif t == 's':
-                args.append(self._read_padded_string())
-            else:
-                raise ValueError(f"Unsupported OSC arg type: {t}")
+        if argspec and not argspec.strip('if'):
+            # Point clouds contain only numbers; unpack the whole payload in C.
+            size = 4 * len(argspec)
+            if self.i + size != self.n:
+                raise ValueError("Invalid OSC numeric payload length")
+            args = list(struct.unpack_from('>' + argspec, self.data, self.i))
+            self.i += size
+        else:
+            for t in argspec:
+                if t == 'i':
+                    args.append(self._read_int32())
+                elif t == 'f':
+                    args.append(self._read_float32())
+                elif t == 's':
+                    args.append(self._read_padded_string())
+                else:
+                    raise ValueError(f"Unsupported OSC arg type: {t}")
+        if self.i != self.n or not address.startswith('/'):
+            raise ValueError("Invalid OSC message length or address")
         return address, args
 
 # -----------------------------------------------------------------------------
@@ -448,15 +457,98 @@ def format_report(subject_name, target_name, report):
 # Runtime
 # -----------------------
 
+MOTION_BUFFER_MAX_AGE = 0.05
+
+class chunk_stream:
+    """Bounded assembly and ordering for one motion or point-cloud source."""
+    def __init__(self, buffers, ready):
+        self.buffers = buffers
+        self.ready = ready
+        self.sender = None
+        self.last_frame = -1
+        self.last_time = 0.0
+        self.last_stamp = ""
+        self.received_times = deque(maxlen=240)
+
+    def expire(self, now):
+        for key in [k for k, v in self.buffers.items() if now - v["time"] >= 0.5]:
+            del self.buffers[key]
+
+    def add(self, sender, index, metadata, count, chunk, items, now):
+        self.expire(now)
+        stamp = metadata.get("timestamp", "")
+        same = sender == self.sender
+        # A restarted index is accepted after one second without a newer frame.
+        ordered = index > self.last_frame or (index < self.last_frame and now - self.last_time >= 1.0)
+        fresh = not stamp or not self.last_stamp or stamp >= self.last_stamp
+        available = self.sender is None or same or now - self.last_time >= 2.0
+        result = None
+        if available and (not same or (ordered and fresh)):
+            key = (sender, index)
+            buf = self.buffers.get(key)
+            if buf is None:
+                if len(self.buffers) >= 8:
+                    del self.buffers[next(iter(self.buffers))]
+                buf = {"time": now, "metadata": metadata, "count": count, "chunks": {}, "size": 0}
+                self.buffers[key] = buf
+            if buf["metadata"] != metadata or buf["count"] != count:
+                del self.buffers[key]
+                raise ValueError("Conflicting chunk metadata")
+            previous = buf["chunks"].get(chunk)
+            if previous is not None and previous != items:
+                del self.buffers[key]
+                raise ValueError("Conflicting duplicate chunk")
+            if previous is None:
+                buf["size"] += len(items)
+            buf["chunks"][chunk] = items
+            if buf["size"] > metadata["total"]:
+                del self.buffers[key]
+                raise ValueError("Chunks exceed the declared frame size")
+            if len(buf["chunks"]) == count:
+                del self.buffers[key]
+                joined = [item for i in range(count) for item in buf["chunks"][i]]
+                if len(joined) != metadata["total"]:
+                    raise ValueError("Frame item count does not match its header")
+                if "actor" in metadata:
+                    indices = {b["bone_index"] for b in joined}
+                    names = {b["bone_name"] for b in joined}
+                    if len(indices) != len(joined) or len(names) != len(joined):
+                        raise ValueError("Duplicate bone index or name")
+                    if any(b["parent_index"] != -1 and b["parent_index"] not in indices for b in joined):
+                        raise ValueError("Missing parent bone")
+                    joined.sort(key=lambda b: b["bone_index"])
+                if self.sender is not None and (not same or index <= self.last_frame):
+                    self.received_times.clear()
+                    self.buffers.clear()
+                    self.ready.clear()
+                else:
+                    for old in [k for k in self.buffers if k[0] != sender or k[1] <= index]:
+                        del self.buffers[old]
+                if "actor" not in metadata or (self.ready and self.ready[-1]["actor"] != metadata["actor"]):
+                    self.ready.clear()
+                self.sender, self.last_frame, self.last_time, self.last_stamp = sender, index, now, stamp
+                self.received_times.append(now)
+                result = dict(metadata, frame_idx=index, received_at=now)
+                result["bones" if "actor" in metadata else "points"] = joined
+                self.ready.append(result)
+        return result
+
+
+def frame_rate(times, now):
+    return float(sum(t > now - 1.0 for t in times))
+
+
 class MOVINRuntime:
     def __init__(self):
         self.thread = None
         self.sock = None
         self.running = False
+        self.scene_name = ""
         self.lock = threading.Lock()
         self.frame_buffers = {}
         self.pointcloud_buffers = {}
-        self.ready_frames = deque(maxlen=4)
+        # A third complete frame replaces the oldest, never growing the delay.
+        self.ready_frames = deque(maxlen=2)
         self.ready_pointclouds = deque(maxlen=2)
         # Rest data from collect_bone_rest_frames(), and the armature it came
         # from. Rebuilt when the bound armature changes. Nothing here is a
@@ -479,17 +571,18 @@ class MOVINRuntime:
         self.last_sender = ""
         self.last_parse_error = ""
         self.socket_error = ""
-        self.recv_count = 0
-        self.last_rate_time = time.time()
-        self.recv_rate_hz = 0.0
-        self.socket_poll_count = 0
-        self.last_socket_poll_rate_time = time.time()
-        self.socket_poll_rate_hz = 0.0
-        self.completed_frame_rate_count = 0
-        self.last_completed_frame_rate_time = time.time()
-        self.completed_frame_rate_hz = 0.0
         self.warned_constraints = False  # NEW: one-time console warning
+        self._reset_streams()
         self._reset_skeleton_diagnostics()
+
+    def _reset_streams(self):
+        self.motion = chunk_stream(self.frame_buffers, self.ready_frames)
+        self.cloud = chunk_stream(self.pointcloud_buffers, self.ready_pointclouds)
+        self.applied_times = deque(maxlen=240)
+        self.status_request = None
+        self.status_sent = 0.0
+        self.matched = 0
+        self.missing = 0
 
     def _reset_skeleton_diagnostics(self):
         self.skeleton_subject = ""
@@ -514,7 +607,7 @@ class MOVINRuntime:
         """Record the skeleton carried by one completed frame.
 
         Called from the receiver thread with self.lock already held, so it sees
-        every frame - the timer only ever applies the newest one and would
+        every frame - the timer may discard frames when overloaded and would
         undercount. Keeps the latest lengths for the main thread to compare, and
         counts how often each length changes so world movement can be told apart
         from a bone length later.
@@ -578,155 +671,14 @@ class MOVINRuntime:
             self.last_sender = ""
             self.last_parse_error = ""
             self.socket_error = ""
-            self.recv_count = 0
-            self.recv_rate_hz = 0.0
-            self.socket_poll_count = 0
-            self.last_socket_poll_rate_time = time.time()
-            self.socket_poll_rate_hz = 0.0
-            self.completed_frame_rate_count = 0
-            self.last_completed_frame_rate_time = time.time()
-            self.completed_frame_rate_hz = 0.0
             self.warned_constraints = False
+            self._reset_streams()
             self._reset_skeleton_diagnostics()
 
 _runtime = MOVINRuntime()
 
 # -----------------------
-# Stream Validation Logger
-# -----------------------
-
-class _StreamValidationLogger:
-    TARGET_NAME = "Blender"
-    PACKET_HEADER = "MOVIN_STREAM_VALIDATION_PACKET_V1"
-    POSE_HEADER = "MOVIN_STREAM_VALIDATION_POSE_V1"
-    PACKET_FORMAT = "base64_udp_datagram"
-    FLOAT_FORMAT = "round6"
-
-    def __init__(self):
-        self.lock = threading.Lock()
-        self.session_id = ""
-        self.target = self.TARGET_NAME
-        self.directory = None
-        self.packet_path = None
-        self.pose_path = None
-        self.packet_idx = 0
-        self.running = False
-
-    def begin(self, session_id, target, duration_seconds, directory_path, port):
-        with self.lock:
-            try:
-                self._reset()
-                self.session_id = str(session_id)
-                self.target = str(target or self.TARGET_NAME)
-                self.directory = Path(directory_path)
-                self.packet_path = self.directory / f"{self.session_id}_Plugin"
-                self.pose_path = self.directory / f"{self.session_id}_PluginApplied"
-                self.packet_idx = 0
-                self.directory.mkdir(parents=True, exist_ok=True)
-                self._write_packet_header()
-                self._write_pose_header()
-                self.running = True
-                print(f"[MOVIN Live] Stream validation started: {self.session_id} ({self.target}) on UDP {int(port)}")
-            except Exception as e:
-                print("[MOVIN Live] Stream validation begin error:", e)
-                self._reset()
-
-    def end(self, session_id=""):
-        with self.lock:
-            if self.running and (not session_id or str(session_id) == self.session_id):
-                print(f"[MOVIN Live] Stream validation ended: {self.session_id}")
-                self._reset()
-
-    def close(self):
-        with self.lock:
-            self._reset()
-
-    def log_packet(self, data, frame_idx):
-        if int(frame_idx) >= 0:
-            return
-
-        with self.lock:
-            if not self.running or self.packet_path is None:
-                return
-
-            try:
-                with self.packet_path.open("a", encoding="utf-8", newline="\n") as f:
-                    f.write(f"{self.packet_idx:06d}|{base64.b64encode(data).decode('ascii')}\n")
-                self.packet_idx += 1
-            except Exception as e:
-                print("[MOVIN Live] Stream validation packet log error:", e)
-                self._reset()
-
-    def log_pose_frame(self, frame):
-        frame_idx = int(frame.get("frame_idx", 0))
-        if frame_idx >= 0:
-            return
-
-        with self.lock:
-            if not self.running or self.pose_path is None:
-                return
-
-            try:
-                with self.pose_path.open("a", encoding="utf-8", newline="\n") as f:
-                    for bone in frame["bones"]:
-                        f.write(self._pose_line(frame_idx, bone) + "\n")
-            except Exception as e:
-                print("[MOVIN Live] Stream validation pose log error:", e)
-                self._reset()
-
-    def _write_packet_header(self):
-        with self.packet_path.open("w", encoding="utf-8", newline="\n") as f:
-            f.write(f"{self.PACKET_HEADER}\n")
-            f.write(f"session={self.session_id}\n")
-            f.write(f"target={self.target}\n")
-            f.write(f"packet_format={self.PACKET_FORMAT}\n")
-
-    def _write_pose_header(self):
-        with self.pose_path.open("w", encoding="utf-8", newline="\n") as f:
-            f.write(f"{self.POSE_HEADER}\n")
-            f.write(f"session={self.session_id}\n")
-            f.write(f"target={self.target}\n")
-            f.write(f"float={self.FLOAT_FORMAT}\n")
-
-    def _reset(self):
-        self.session_id = ""
-        self.target = self.TARGET_NAME
-        self.directory = None
-        self.packet_path = None
-        self.pose_path = None
-        self.packet_idx = 0
-        self.running = False
-
-    def _pose_line(self, frame_idx, bone):
-        q = bone["q"]
-        p = bone["p"]
-        s = bone["s"]
-        return "|".join((
-            str(int(frame_idx)),
-            str(bone["bone_name"]),
-            self._fmt(p[0]),
-            self._fmt(p[1]),
-            self._fmt(p[2]),
-            self._fmt(q[1]),
-            self._fmt(q[2]),
-            self._fmt(q[3]),
-            self._fmt(q[0]),
-            self._fmt(s[0]),
-            self._fmt(s[1]),
-            self._fmt(s[2]),
-        ))
-
-    def _fmt(self, value):
-        v = float(value)
-        rounded = math.copysign(math.floor(abs(v) * 1000000.0 + 0.5) / 1000000.0, v)
-        if rounded == 0.0:
-            rounded = 0.0
-        return f"{rounded:.6f}"
-
-_validation_logger = _StreamValidationLogger()
-
-# -----------------------
-# Scene Properties
+# Properties
 # -----------------------
 
 class MOVIN_Props(PropertyGroup):
@@ -742,24 +694,13 @@ class MOVIN_Props(PropertyGroup):
     )
     hips_bone_name: StringProperty(
         name="Hips Bone",
-        description="Bone that should receive the global translation/rotation when Root is not applied to object",
+        description="Bone whose world position follows the streamed hips position",
         default="Hips"
-    )
-    hips_y_offset: FloatProperty(
-        name="Hips Height Offset (m)",
-        description=(
-            "Vertical offset in metres, added to the streamed hips height before it is "
-            "applied. The streamed height is the performer's, measured from wherever "
-            "MOVIN Studio's origin sits, so it does not line up with this armature's "
-            "hips on its own. Tune it until the character stands at the right height; "
-            "from there only the movement away from that pose is transferred. The scale "
-            "is derived from the armature and is not set here"
-        ),
-        default=-0.87
     )
     is_running: BoolProperty(
         name="Running",
-        default=False
+        get=lambda self: _runtime.running and _runtime.scene_name == self.id_data.name,
+        options={'SKIP_SAVE'}
     )
     pointcloud_enabled: BoolProperty(
         name="Visualize Point Cloud",
@@ -775,277 +716,139 @@ class MOVIN_Props(PropertyGroup):
 # OSC Server Thread
 # -----------------------
 
-def _udp_server_loop(port):
-    global _runtime
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 * 1024 * 1024)
-    except OSError:
-        pass
+def _receive_packet(data, sender, now):
+    address, args = _OscReader(data).read_message()
+    _runtime.last_packet_address = address
 
-    try:
-        sock.bind(("0.0.0.0", port))
-        sock.settimeout(1.0 / 120.0)
-        _runtime.sock = sock
-        with _runtime.lock:
-            _runtime.socket_error = ""
-    except OSError as e:
-        with _runtime.lock:
-            _runtime.socket_error = f"Failed to bind UDP {port}: {e}"
-        _runtime.running = False
-        try:
-            sock.close()
-        except Exception:
-            pass
-        print("[MOVIN Live]", _runtime.socket_error)
-        return
+    def integer(value, minimum, maximum):
+        if type(value) is not int or not minimum <= value <= maximum:
+            raise ValueError("Invalid integer in streaming packet")
+        return value
 
-    PARTIAL_TTL_SEC = 0.5
+    def text(value, maximum):
+        if not isinstance(value, str) or not 0 < len(value) <= maximum:
+            raise ValueError("Invalid string in streaming packet")
+        return value
 
+    if address == "/MOVIN/Blender/Status/Request":
+        if len(args) != 2:
+            raise ValueError("Invalid status request")
+        token = text(args[0], 32)
+        if len(token) != 32 or any(c not in "0123456789abcdefABCDEF" for c in token):
+            raise ValueError("Invalid status token")
+        port = integer(args[1], 1, 65535)
+        if now - _runtime.status_sent >= 0.25:
+            _runtime.status_request = (sender, port, token)
+    elif address == "/MOVIN/Frame":
+        if len(args) < 7:
+            raise ValueError("Truncated motion header")
+        stamp, actor = text(args[0], 64), text(args[1], 256)
+        index = integer(args[2], 0, 2147483647)
+        count = integer(args[3], 1, 4096)
+        chunk = integer(args[4], 0, count - 1)
+        total = integer(args[5], 1, 4096)
+        size = integer(args[6], 1, total)
+        if count > total or len(args) != 7 + size * 17:
+            raise ValueError("Invalid motion chunk size")
+        bones = []
+        for k in range(7, len(args), 17):
+            bone_index = integer(args[k], 0, 4095)
+            parent = integer(args[k + 1], -1, bone_index - 1)
+            name = text(args[k + 2], 256)
+            values = args[k + 3:k + 17]
+            if any(type(v) is not float or not math.isfinite(v) for v in values):
+                raise ValueError("Non-finite or invalid bone transform")
+            px, py, pz, rx, ry, rz, rw, qx, qy, qz, qw, sx, sy, sz = values
+            rn = math.sqrt(rx*rx + ry*ry + rz*rz + rw*rw)
+            qn = math.sqrt(qx*qx + qy*qy + qz*qz + qw*qw)
+            if rn < 1e-6 or qn < 1e-6:
+                raise ValueError("Zero bone rotation")
+            bones.append({"bone_index": bone_index, "parent_index": parent, "bone_name": name,
+                          "p": (px, py, pz), "rq": (rw/rn, rx/rn, ry/rn, rz/rn),
+                          "q": (qw/qn, qx/qn, qy/qn, qz/qn), "s": (sx, sy, sz)})
+        _runtime.frame_packets += 1
+        frame = _runtime.motion.add(sender, index, {"timestamp": stamp, "actor": actor, "total": total}, count, chunk, bones, now)
+        if frame is not None:
+            _runtime.last_parse_error = ""
+            _runtime.last_actor, _runtime.last_ts = actor, stamp
+            _runtime.completed_frames += 1
+            _runtime.note_skeleton_locked(actor, frame["bones"])
+    elif address == "/MOVIN/PointCloud":
+        if len(args) < 5:
+            raise ValueError("Truncated point cloud header")
+        index = integer(args[0], 0, 2147483647)
+        total = integer(args[1], 0, 200000)
+        count = integer(args[3], 1, max(1, total))
+        chunk = integer(args[2], 0, count - 1)
+        size = integer(args[4], 0, total)
+        if len(args) != 5 + size * 3 or (size == 0 and (count != 1 or total != 0)):
+            raise ValueError("Invalid point cloud chunk size")
+        values = args[5:]
+        if any(type(v) is not float or not math.isfinite(v) for v in values):
+            raise ValueError("Non-finite or invalid point cloud position")
+        points = list(zip(values[::3], values[1::3], values[2::3]))
+        cloud = _runtime.cloud.add(sender, index, {"total": total}, count, chunk, points, now)
+        if cloud is not None:
+            _runtime.last_parse_error = ""
+            _runtime.last_pointcloud_frame = index
+            _runtime.last_pointcloud_count = total
+
+
+def _udp_server_loop(sock):
     try:
         while _runtime.running:
-            now = time.time()
-            with _runtime.lock:
-                _runtime.socket_poll_count += 1
-                socket_dt = now - _runtime.last_socket_poll_rate_time
-                if socket_dt >= 1.0:
-                    _runtime.socket_poll_rate_hz = _runtime.socket_poll_count / socket_dt
-                    _runtime.socket_poll_count = 0
-                    _runtime.last_socket_poll_rate_time = now
-
-                recv_dt = now - _runtime.last_rate_time
-                if recv_dt >= 1.0:
-                    _runtime.recv_rate_hz = _runtime.recv_count / recv_dt
-                    _runtime.recv_count = 0
-                    _runtime.last_rate_time = now
-
-                frame_dt = now - _runtime.last_completed_frame_rate_time
-                if frame_dt >= 1.0:
-                    _runtime.completed_frame_rate_hz = _runtime.completed_frame_rate_count / frame_dt
-                    _runtime.completed_frame_rate_count = 0
-                    _runtime.last_completed_frame_rate_time = now
-
             try:
-                data, addr = sock.recvfrom(65535)
+                data, sender = sock.recvfrom(65535)
+                now = time.monotonic()
                 with _runtime.lock:
+                    _runtime.motion.expire(now)
+                    _runtime.cloud.expire(now)
                     _runtime.received_packets += 1
-                    _runtime.last_packet_time = time.strftime("%H:%M:%S")
+                    _runtime.last_sender = f"{sender[0]}:{sender[1]}"
                     _runtime.last_packet_bytes = len(data)
-                    _runtime.last_sender = f"{addr[0]}:{addr[1]}"
+                    _runtime.last_packet_time = time.strftime("%H:%M:%S")
+                    _receive_packet(data, sender, now)
             except socket.timeout:
-                now = time.time()
                 with _runtime.lock:
-                    stale_frames = [k for k, v in _runtime.frame_buffers.items()
-                                    if now - v.get("_t0", now) > PARTIAL_TTL_SEC]
-                    stale_pointclouds = [k for k, v in _runtime.pointcloud_buffers.items()
-                                         if now - v.get("_t0", now) > PARTIAL_TTL_SEC]
-                    for k in stale_frames:
-                        del _runtime.frame_buffers[k]
-                    for k in stale_pointclouds:
-                        del _runtime.pointcloud_buffers[k]
-                continue
-            except OSError:
-                break
-
-            try:
-                reader = _OscReader(data)
-                address, args = reader.read_message()
-            except Exception as e:
-                print("[MOVIN Live] OSC parse error:", e)
+                    now = time.monotonic()
+                    _runtime.motion.expire(now)
+                    _runtime.cloud.expire(now)
+            except (ValueError, IndexError, OverflowError) as e:
                 with _runtime.lock:
+                    if _runtime.last_parse_error != str(e):
+                        print("[MOVIN Live] Packet rejected:", e)
                     _runtime.last_parse_error = str(e)
-                continue
-
-            now = time.time()
-            with _runtime.lock:
-                _runtime.last_packet_address = address
-                _runtime.last_parse_error = ""
-                _runtime.recv_count += 1
-
-            if address == "/MOVIN/StreamValidation/Begin":
-                try:
-                    session_id = args[0]
-                    target = args[1]
-                    duration_seconds = int(args[2])
-                    directory_path = args[3]
-                except Exception as e:
-                    print("[MOVIN Live] Bad validation begin args:", e)
-                    with _runtime.lock:
-                        _runtime.last_parse_error = f"Bad validation begin args: {e}"
-                    continue
-
-                _validation_logger.begin(session_id, target, duration_seconds, directory_path, port)
-                continue
-
-            if address == "/MOVIN/StreamValidation/End":
-                try:
-                    session_id = args[0]
-                except Exception:
-                    session_id = ""
-
-                _validation_logger.end(session_id)
-                continue
-
-            if address == "/MOVIN/Frame":
-                try:
-                    ts = args[0]
-                    actor_name = args[1]
-                    frame_idx = int(args[2])
-                    num_chunks = int(args[3])
-                    chunk_idx = int(args[4])
-                    total_bones = int(args[5])
-                    chunk_bones = int(args[6])
-                except Exception as e:
-                    print("[MOVIN Live] Bad frame header args:", e)
-                    with _runtime.lock:
-                        _runtime.last_parse_error = f"Bad frame header args: {e}"
-                    continue
-
-                _validation_logger.log_packet(data, frame_idx)
-
-                k = 7
-                bones_in_chunk = []
-                try:
-                    for _ in range(chunk_bones):
-                        bone_index = int(args[k]); k += 1
-                        parent_index = int(args[k]); k += 1
-                        bone_name = args[k]; k += 1
-                        px = float(args[k]); py = float(args[k+1]); pz = float(args[k+2]); k += 3
-                        rqx = float(args[k]); rqy = float(args[k+1]); rqz = float(args[k+2]); rqw = float(args[k+3]); k += 4
-                        qx = float(args[k]); qy = float(args[k+1]); qz = float(args[k+2]); qw = float(args[k+3]); k += 4
-                        sx = float(args[k]); sy = float(args[k+1]); sz = float(args[k+2]); k += 3
-                        bones_in_chunk.append({
-                            "bone_index": bone_index,
-                            "parent_index": parent_index,
-                            "bone_name": bone_name,
-                            "p": (px, py, pz),
-                            "rq": (rqw, rqx, rqy, rqz),
-                            "q": (qw, qx, qy, qz),  # (w,x,y,z)
-                            "s": (sx, sy, sz),
-                        })
-                except Exception as e:
-                    print("[MOVIN Live] Truncated/invalid bone block:", e)
-                    with _runtime.lock:
-                        _runtime.last_parse_error = f"Truncated/invalid bone block: {e}"
-                    continue
-
-                key = (actor_name, frame_idx)
-                frame_to_log = None
-                with _runtime.lock:
-                    _runtime.frame_packets += 1
-                    buf = _runtime.frame_buffers.get(key)
-                    if buf is None:
-                        buf = {
-                            "_t0": now,
-                            "timestamp": ts,
-                            "actor": actor_name,
-                            "frame_idx": frame_idx,
-                            "num_chunks": num_chunks,
-                            "total_bones": total_bones,
-                            "chunks": {},
-                        }
-                        _runtime.frame_buffers[key] = buf
-
-                    buf["chunks"][chunk_idx] = bones_in_chunk
-
-                    if len(buf["chunks"]) >= buf["num_chunks"]:
-                        ordered = []
-                        complete = True
-                        for ci in range(buf["num_chunks"]):
-                            part = buf["chunks"].get(ci)
-                            if not part:
-                                complete = False
-                                break
-                            ordered.extend(part)
-                        if complete and ordered:
-                            frame = {
-                                "timestamp": buf["timestamp"],
-                                "actor": buf["actor"],
-                                "frame_idx": buf["frame_idx"],
-                                "bones": ordered,
-                            }
-                            _runtime.ready_frames.append(frame)
-                            _runtime.last_actor = buf["actor"]
-                            _runtime.last_ts = buf["timestamp"]
-                            frame_to_log = frame
-                            _runtime.completed_frames += 1
-                            _runtime.completed_frame_rate_count += 1
-                            _runtime.note_skeleton_locked(buf["actor"], ordered)
-                        del _runtime.frame_buffers[key]
-
-                if frame_to_log is not None:
-                    _validation_logger.log_pose_frame(frame_to_log)
-
-            elif address == "/MOVIN/PointCloud":
-                try:
-                    frame_idx = int(args[0])
-                    total_points = int(args[1])
-                    chunk_idx = int(args[2])
-                    num_chunks = int(args[3])
-                    chunk_point_count = int(args[4])
-                except Exception as e:
-                    print("[MOVIN Live] Bad point cloud header args:", e)
-                    with _runtime.lock:
-                        _runtime.last_parse_error = f"Bad point cloud header args: {e}"
-                    continue
-
-                k = 5
-                points_in_chunk = []
-                try:
-                    for _ in range(chunk_point_count):
-                        px = float(args[k]); py = float(args[k+1]); pz = float(args[k+2]); k += 3
-                        points_in_chunk.append((px, py, pz))
-                except Exception as e:
-                    print("[MOVIN Live] Truncated/invalid point cloud block:", e)
-                    with _runtime.lock:
-                        _runtime.last_parse_error = f"Truncated/invalid point cloud block: {e}"
-                    continue
-
-                key = frame_idx
-                with _runtime.lock:
-                    buf = _runtime.pointcloud_buffers.get(key)
-                    if buf is None:
-                        buf = {
-                            "_t0": now,
-                            "frame_idx": frame_idx,
-                            "num_chunks": num_chunks,
-                            "total_points": total_points,
-                            "chunks": {},
-                        }
-                        _runtime.pointcloud_buffers[key] = buf
-
-                    buf["chunks"][chunk_idx] = points_in_chunk
-
-                    if len(buf["chunks"]) >= buf["num_chunks"]:
-                        ordered = []
-                        complete = True
-                        for ci in range(buf["num_chunks"]):
-                            part = buf["chunks"].get(ci)
-                            if part is None:
-                                complete = False
-                                break
-                            ordered.extend(part)
-                        if complete:
-                            pointcloud = {
-                                "frame_idx": buf["frame_idx"],
-                                "points": ordered,
-                            }
-                            _runtime.ready_pointclouds.append(pointcloud)
-                            _runtime.last_pointcloud_frame = buf["frame_idx"]
-                            _runtime.last_pointcloud_count = len(ordered)
-                        del _runtime.pointcloud_buffers[key]
-
-            else:
-                continue
-
+    except OSError as e:
+        if _runtime.running:
+            _runtime.socket_error = str(e)
+            print("[MOVIN Live] Socket failed:", e)
+    except Exception as e:
+        _runtime.socket_error = str(e)
+        traceback.print_exc()
     finally:
-        try:
-            sock.close()
-        except Exception:
-            pass
-        _validation_logger.close()
-        _runtime.sock = None
+        _runtime.running = False
+        sock.close()
+
+
+def _stop_receiver():
+    _runtime.running = False
+    if bpy.app.timers.is_registered(_timer_tick):
+        bpy.app.timers.unregister(_timer_tick)
+    if _runtime.sock is not None:
+        _runtime.sock.close()
+    if _runtime.thread is not None:
+        _runtime.thread.join(timeout=2.0)
+        if _runtime.thread.is_alive():
+            raise RuntimeError("MOVIN receiver did not stop")
+    _runtime.thread = None
+    _runtime.sock = None
+    _runtime.scene_name = ""
+    _runtime.reset()
+
+
+def _before_file_load(unused):
+    _stop_receiver()
+
 
 # -----------------------
 # Coordinate & Math
@@ -1054,7 +857,7 @@ def _udp_server_loop(port):
 def unity_to_blender_vec(v):
     return (-v[0], v[1], v[2])
 
-def unity_to_blender_pointcloud_vec(v):
+def unity_to_blender_world_vec(v):
     return (-v[0], -v[2], v[1])
 
 def unity_to_blender_quat(q):
@@ -1138,7 +941,9 @@ def _ensure_pointcloud_modifier(obj):
     modifier = obj.modifiers.get("MOVIN_PointCloud")
     if modifier is None:
         modifier = obj.modifiers.new(name="MOVIN_PointCloud", type='NODES')
-    modifier.node_group = _ensure_pointcloud_gn_tree()
+    node_group = _ensure_pointcloud_gn_tree()
+    if modifier.node_group != node_group:
+        modifier.node_group = node_group
     return modifier
 
 def _ensure_pointcloud_material(material_name, rgba):
@@ -1151,22 +956,28 @@ def _ensure_pointcloud_material(material_name, rgba):
         nodes = mat.node_tree.nodes
         principled = nodes.get("Principled BSDF")
         if principled is not None:
-            principled.inputs["Base Color"].default_value = rgba
-            principled.inputs["Emission Color"].default_value = rgba
-            principled.inputs["Emission Strength"].default_value = 1.0
-            principled.inputs["Roughness"].default_value = 0.35
-    mat.diffuse_color = rgba
+            for name, value in (("Base Color", rgba), ("Emission Color", rgba),
+                                ("Emission Strength", 1.0), ("Roughness", 0.35)):
+                current = principled.inputs[name].default_value
+                if isinstance(value, tuple):
+                    current = tuple(current)
+                    value = tuple(float(np.float32(v)) for v in value)
+                else:
+                    value = float(np.float32(value))
+                if current != value:
+                    principled.inputs[name].default_value = value
+    rgba = tuple(float(np.float32(v)) for v in rgba)
+    if tuple(mat.diffuse_color) != rgba:
+        mat.diffuse_color = rgba
     return mat
 
 def _ensure_pointcloud_object(scene, object_name):
     obj = bpy.data.objects.get(object_name)
-    if obj is not None and obj.type == 'MESH':
-        _ensure_pointcloud_modifier(obj)
+    if obj is not None and obj.type == 'MESH' and obj.modifiers.get("MOVIN_PointCloud") is not None:
         return obj
 
-    if obj is not None and obj.type != 'MESH':
-        print(f"[MOVIN Live] Existing object '{object_name}' is not a Mesh")
-        return None
+    if obj is not None:
+        raise ValueError(f"'{object_name}' already exists. Choose a different point cloud object name.")
 
     mesh = bpy.data.meshes.new(object_name)
     obj = bpy.data.objects.new(object_name, mesh)
@@ -1180,26 +991,30 @@ def _ensure_pointcloud_object(scene, object_name):
 
 def _update_pointcloud_object(scene, object_name, points, radius, color_rgba):
     obj = _ensure_pointcloud_object(scene, object_name)
-    if obj is None:
-        return
-
     mesh = obj.data
-    mesh.clear_geometry()
-    mesh.from_pydata(points, [], [])
+    if len(mesh.vertices) != len(points):
+        mesh.clear_geometry()
+        mesh.vertices.add(len(points))
+    mesh.vertices.foreach_set("co", np.asarray(points, dtype=np.float32).ravel())
     mesh.update()
 
     modifier = _ensure_pointcloud_modifier(obj)
-    try:
+    radius = float(np.float32(radius))
+    if bpy.app.version >= (5, 2, 0):
+        socket = modifier.properties.inputs.Socket_2
+        if socket.value != radius:
+            socket.value = radius
+    elif modifier.get("Socket_2") != radius:
         modifier["Socket_2"] = radius
-    except Exception:
-        pass
 
     material = _ensure_pointcloud_material(object_name + "_MAT", color_rgba)
     if len(mesh.materials) == 0:
         mesh.materials.append(material)
-    else:
+    elif mesh.materials[0] != material:
         mesh.materials[0] = material
-    obj.color = color_rgba
+    color_rgba = tuple(float(np.float32(v)) for v in color_rgba)
+    if tuple(obj.color) != color_rgba:
+        obj.color = color_rgba
 
 def _downsample_points(points, max_points):
     if max_points <= 0 or len(points) <= max_points:
@@ -1394,16 +1209,15 @@ def _apply_latest_stream_data(scene_name):
     props = scene.movin_props
     arm_obj = bpy.data.objects.get(props.armature_name)
     with _runtime.lock:
-        frame = _runtime.ready_frames.pop() if _runtime.ready_frames else None
-        if frame is not None:
-            _runtime.ready_frames.clear()
-            _runtime.last_applied = frame["frame_idx"]
+        now = time.monotonic()
+        while _runtime.ready_frames and now - _runtime.ready_frames[0]["received_at"] >= MOTION_BUFFER_MAX_AGE:
+            _runtime.ready_frames.popleft()
+        frame = _runtime.ready_frames.popleft() if _runtime.ready_frames else None
 
         pointcloud = _runtime.ready_pointclouds.pop() if _runtime.ready_pointclouds else None
         if pointcloud is not None:
             _runtime.ready_pointclouds.clear()
 
-    did_apply = False
 
     if frame is not None and arm_obj is not None and arm_obj.type == 'ARMATURE':
         # Ensure POSE position so viewport shows pose changes
@@ -1451,65 +1265,52 @@ def _apply_latest_stream_data(scene_name):
         # index incoming by bone name
         by_name = {b["bone_name"]: b for b in frame["bones"]}
 
-        # apply pose
+        by_index = {b["bone_index"]: b for b in frame["bones"]}
+        hips = pose_bones.get(hips_bone_name) if hips_bone_name in by_name else None
+        if hips is not None and hips.bone.use_connect:
+            raise ValueError(
+                f"Hips bone '{hips.name}' is Connected to its parent. "
+                "Clear Connected in Edit Mode to apply the streamed world position.")
+        consumed = set()
+        matched = 0
         for name, bdat in by_name.items():
             pb = pose_bones.get(name)
             if pb is None:
                 continue
 
-            p = vec_conv(bdat["p"])
-            rq = quat_conv(bdat["rq"])
-            q = quat_conv(bdat["q"])
+            matched += 1
+            p, rq, q, s = bdat["p"], bdat["rq"], bdat["q"], bdat["s"]
+            parent = bdat["parent_index"]
+            while parent >= 0 and by_index[parent]["bone_name"] not in pose_bones:
+                ancestor = by_index[parent]
+                rotated = rotate_vec(tuple(a * b for a, b in zip(p, ancestor["s"])), ancestor["q"])
+                p = tuple(a + b for a, b in zip(ancestor["p"], rotated))
+                rq, q = quat_mul(ancestor["rq"], rq), quat_mul(ancestor["q"], q)
+                s = tuple(a * b for a, b in zip(ancestor["s"], s))
+                consumed.add(ancestor["bone_name"])
+                parent = ancestor["parent_index"]
+            p, rq, q = vec_conv(p), quat_conv(rq), quat_conv(q)
             rq_inv = quat_conj(rq)
             q = quat_mul(rq_inv, q)
-            s = bdat["s"] # local scale wo conversion
 
             rest_frame = bone_rest_frames.get(name)
             streamed_units = (p[0] * units_per_metre,
                               p[1] * units_per_metre,
                               p[2] * units_per_metre)
 
-            if name == hips_bone_name:
-                # The hips translation is a world position rather than a bone
-                # length, so there is no parent-relative offset to measure it
-                # against. hips_y_offset stands in as the reference height: what
-                # is left after it is the movement away from the pose it was tuned
-                # for, applied on top of wherever this armature's rest pose puts
-                # its hips - so the character keeps its own height.
-                #
-                # Whether that reference happens to equal the performer's standing
-                # height is not something the add-on can know; it is a value the
-                # user dials until the character stands right.
-                #
-                # The scale, by contrast, is derived rather than dialled. The old
-                # fixed x100 was right only for a centimetre-authored rig and
-                # overshot a metre-authored one by a hundred times.
-                if rest_frame is not None:
-                    pb.location = rest_relative_location(
-                        streamed_units,
-                        (0.0, -props.hips_y_offset * units_per_metre, 0.0),
-                        rest_frame["axes"])
-            elif rest_frame is not None and rest_frame["offset"] is not None:
-                # The calibrated offset. Both sides are in the parent's rest
-                # frame: the streamed value is Unity's localPosition, and
-                # collect_bone_rest_frames() puts the armature's own offset in the
-                # same frame. Measuring against the rest pose rather than against
-                # the first frame received is what makes this deterministic.
-                #
-                # A Character stream is already retargeted onto this same .fbx, so
-                # its offsets equal the rest offsets and this comes out zero.
-                location = rest_relative_location(
-                    streamed_units, rest_frame["offset"], rest_frame["axes"])
-                pb.location = location
+            if name != hips_bone_name:
+                if rest_frame is not None and rest_frame["offset"] is not None:
+                    # Subtract the rig's rest offset to preserve streamed bone lengths.
+                    location = rest_relative_location(
+                        streamed_units, rest_frame["offset"], rest_frame["axes"])
+                    pb.location = location
 
-                if blocked_by_connect is not None and rest_frame["connected"]:
-                    if max(abs(v) for v in location) > connect_report_threshold:
-                        blocked_by_connect.append(name)
-            else:
-                # Streamed but absent from the rig, or parentless and not the
-                # hips. Zeroed rather than left alone, so a pose does not keep
-                # offsets written by an earlier session.
-                pb.location = (0.0, 0.0, 0.0)
+                    if blocked_by_connect is not None and rest_frame["connected"]:
+                        if max(abs(v) for v in location) > connect_report_threshold:
+                            blocked_by_connect.append(name)
+                else:
+                    pb.location = rest_relative_location(
+                        streamed_units, tuple(pb.bone.head_local), rest_frame["axes"])
 
             pb.rotation_mode = 'QUATERNION'
             pb.rotation_quaternion = (q[0], q[1], q[2], q[3])
@@ -1521,6 +1322,34 @@ def _apply_latest_stream_data(scene_name):
             # elif name == "RightHandThumb1":
             #     pb.rotation_quaternion = quat_mul(quat_from_euler((0, -70, 0)), pb.rotation_quaternion)
 
+        if hips is not None:
+            # Reconstruct the source world point before any missing-parent folding.
+            bdat = by_name[hips_bone_name]
+            p, parent = bdat["p"], bdat["parent_index"]
+            while parent >= 0:
+                ancestor = by_index[parent]
+                rotated = rotate_vec(tuple(a * b for a, b in zip(p, ancestor["s"])), ancestor["q"])
+                p = tuple(a + b for a, b in zip(ancestor["p"], rotated))
+                parent = ancestor["parent_index"]
+            world = Vector(unity_to_blender_world_vec(p)) / scene.unit_settings.scale_length
+            target = arm_obj.matrix_world.inverted() @ world
+
+            # Evaluate this frame's parent channels; PoseBone.matrix may still be stale.
+            parent = None
+            for pb in reversed([hips] + list(hips.parent_recursive)):
+                args = {} if parent is None else {
+                    "parent_matrix": pose,
+                    "parent_matrix_local": parent.bone.matrix_local,
+                }
+                pose = pb.bone.convert_local_to_pose(pb.matrix_basis, pb.bone.matrix_local, **args)
+                if pb == hips:
+                    pose.translation = target
+                    basis = pb.bone.convert_local_to_pose(
+                        pose, pb.bone.matrix_local, invert=True, **args)
+                    pb.location = basis.translation
+                parent = pb
+
+        missing = len(by_name) - matched - len(consumed)
         if blocked_by_connect is not None:
             _runtime.warned_connected_bones = True
             if blocked_by_connect:
@@ -1530,21 +1359,27 @@ def _apply_latest_stream_data(scene_name):
                       % (len(blocked_by_connect), ", ".join(sorted(blocked_by_connect))))
                 print("  Clear 'Connected' on those bones in Edit Mode to apply the offsets.")
 
-        did_apply = True
+        with _runtime.lock:
+            _runtime.matched = matched
+            _runtime.missing = missing
+            if matched > 0:
+                _runtime.last_applied = frame["frame_idx"]
+                _runtime.applied_times.append(time.monotonic())
 
     if pointcloud is not None and props.pointcloud_enabled:
         sampled_points = _downsample_points(pointcloud["points"], 15000)
-        converted_points = [unity_to_blender_pointcloud_vec(point) for point in sampled_points]
+        units = armature_units_per_metre((1.0, 1.0, 1.0), scene.unit_settings.scale_length)
+        converted_points = np.asarray(sampled_points, dtype=np.float32).reshape(-1, 3)[:, (0, 2, 1)]
+        converted_points *= (-units, -units, units)
         _update_pointcloud_object(
             scene,
             props.pointcloud_object_name.strip() or "MOVIN_PointCloud",
             converted_points,
-            0.02,
+            0.02 * units,
             (0.10, 0.85, 1.00, 1.00),
         )
         with _runtime.lock:
             _runtime.last_visualized_point_count = len(converted_points)
-        did_apply = True
 
     # Guidance only - never let it take the stream down with it.
     try:
@@ -1553,18 +1388,54 @@ def _apply_latest_stream_data(scene_name):
         print("[MOVIN Live] Skeleton diagnostics failed:")
         traceback.print_exc()
 
-    if not did_apply:
-        return 0.03
+    return 1.0 / 120.0
 
-    return 0.03
+def _timer_tick():
+    started = time.perf_counter()
+    interval = None
+    if _runtime.running:
+        try:
+            interval = _apply_latest_stream_data(_runtime.scene_name)
+            with _runtime.lock:
+                request = _runtime.status_request
+                _runtime.status_request = None
+            if request is not None:
+                sender, port, token = request
+                scene = bpy.data.scenes[_runtime.scene_name]
+                arm = bpy.data.objects.get(scene.movin_props.armature_name)
+                valid = arm is not None and arm.type == 'ARMATURE'
+                now = time.monotonic()
+                with _runtime.lock:
+                    motion, cloud = _runtime.motion, _runtime.cloud
+                    applied_here = valid and _runtime.bone_rest_frames_armature == arm.name
+                    args = [token, 1, arm.name[:256] if valid else "", len(arm.pose.bones) if valid else 0,
+                            _runtime.matched if applied_here else 0, _runtime.missing if applied_here else 0,
+                            frame_rate(motion.received_times, now), frame_rate(_runtime.applied_times, now) if applied_here else 0.0,
+                            frame_rate(cloud.received_times, now),
+                            float(now - motion.last_time) if motion.sender else -1.0,
+                            float(now - cloud.last_time) if cloud.sender else -1.0,
+                            int(sender == motion.sender), int(sender == cloud.sender),
+                            _runtime.last_parse_error[:256]]
+                    _runtime.status_sent = now
+                def osc_string(value):
+                    value = value.encode("utf-8") + b"\0"
+                    return value + b"\0" * (-len(value) % 4)
+                tags = ",sisiiifffffiis"
+                packet = osc_string("/MOVIN/Blender/Status") + osc_string(tags)
+                for tag, value in zip(tags[1:], args):
+                    packet += osc_string(value) if tag == "s" else struct.pack(">" + tag, value)
+                _runtime.sock.sendto(packet, (sender[0], port))
+            if interval is None:
+                _stop_receiver()
+        except Exception as e:
+            traceback.print_exc()
+            _stop_receiver()
+            _runtime.socket_error = str(e)
+    if interval is not None and _runtime.running:
+        # Blender waits after the callback; include our work in the polling period.
+        interval = max(0.001, interval - (time.perf_counter() - started))
+    return interval if _runtime.running else None
 
-def _timer_tick(scene_name):
-    try:
-        return _apply_latest_stream_data(scene_name)
-    except Exception:
-        print("[MOVIN Live] Timer callback failed:")
-        traceback.print_exc()
-        return 0.5
 
 # -----------------------
 # Operators and Panel
@@ -1601,7 +1472,6 @@ class MOVIN_OT_Start(Operator):
     bl_idname = "movin.start_stream"
     bl_label = "Start"
     bl_description = "Start listening for /MOVIN/Frame and applying to the armature"
-    _timer = None
     def execute(self, context):
         global _runtime
         props = context.scene.movin_props
@@ -1618,14 +1488,26 @@ class MOVIN_OT_Start(Operator):
         if arm_obj and hasattr(arm_obj.data, "pose_position"):
             arm_obj.data.pose_position = 'POSE'
 
-        _runtime.reset()
-        _runtime.running = True
-        t = threading.Thread(target=_udp_server_loop, args=(props.port,), daemon=True)
-        _runtime.thread = t
-        t.start()
-        scene_name = context.scene.name
-        self._timer = bpy.app.timers.register(lambda: _timer_tick(scene_name), first_interval=0.01, persistent=True)
-        props.is_running = True
+        _stop_receiver()
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 * 1024 * 1024)
+            sock.bind(("0.0.0.0", props.port))
+            sock.settimeout(0.05)
+            _runtime.sock = sock
+            _runtime.scene_name = context.scene.name
+            _runtime.running = True
+            _runtime.thread = threading.Thread(target=_udp_server_loop, args=(sock,), daemon=True)
+            _runtime.thread.start()
+            bpy.app.timers.register(_timer_tick, first_interval=0.0)
+        except OSError as e:
+            sock.close()
+            _stop_receiver()
+            _runtime.socket_error = f"Cannot listen on port {props.port}: {e}"
+            self.report({'ERROR'}, _runtime.socket_error)
+            return {'CANCELLED'}
         print(f"[MOVIN Live] Listening on UDP {props.port}")
         return {'FINISHED'}
 
@@ -1639,18 +1521,7 @@ class MOVIN_OT_Stop(Operator):
         if not props.is_running:
             self.report({'INFO'}, "Not running")
             return {'CANCELLED'}
-        props.is_running = False
-        _runtime.running = False
-        if _runtime.sock:
-            try:
-                _runtime.sock.close()
-            except Exception:
-                pass
-        time.sleep(0.05)
-        _runtime.thread = None
-        _runtime.sock = None
-        _validation_logger.close()
-        _runtime.reset()
+        _stop_receiver()
         print("[MOVIN Live] Stopped")
         return {'FINISHED'}
 
@@ -1675,9 +1546,9 @@ class MOVIN_OT_DumpStatus(Operator):
             print(" last packet:", _runtime.last_packet_address, _runtime.last_packet_time, _runtime.last_packet_bytes, _runtime.last_sender)
             print(" last parse error:", _runtime.last_parse_error)
             print(" socket error:", _runtime.socket_error)
-            print(" socket poll (Hz):", f"{_runtime.socket_poll_rate_hz:.1f}")
-            print(" udp datagrams (Hz):", f"{_runtime.recv_rate_hz:.1f}")
-            print(" completed frames (Hz):", f"{_runtime.completed_frame_rate_hz:.1f}")
+            print(" received motion FPS:", frame_rate(_runtime.motion.received_times, time.monotonic()))
+            print(" received point cloud FPS:", frame_rate(_runtime.cloud.received_times, time.monotonic()))
+            print(" applied motion FPS:", frame_rate(_runtime.applied_times, time.monotonic()))
             print(" queued complete frames:", len(_runtime.ready_frames))
             print(" queued point clouds:", len(_runtime.ready_pointclouds))
             print(" partials:", len(_runtime.frame_buffers))
@@ -1735,11 +1606,9 @@ class MOVIN_PT_Panel(Panel):
 
         layout.separator(factor=0.5)
         box = layout.box()
-        box.label(text="Global Transform Handling", icon="OUTLINER_OB_ARMATURE")
+        box.label(text="Global Hips Position", icon="OUTLINER_OB_ARMATURE")
         row = box.row(align=True)
         row.prop(props, "hips_bone_name")
-        row = box.row(align=True)
-        row.prop(props, "hips_y_offset")
 
         layout.separator(factor=0.5)
         box = layout.box()
@@ -1776,9 +1645,9 @@ class MOVIN_PT_Panel(Panel):
                 box.label(text=f"Parse Error: {_runtime.last_parse_error}", icon="ERROR")
             box.label(text=f"Point Count: {_runtime.last_pointcloud_count}")
             box.label(text=f"Displayed Points: {_runtime.last_visualized_point_count}")
-            box.label(text=f"Socket Poll: {_runtime.socket_poll_rate_hz:.1f} Hz / 120")
-            box.label(text=f"UDP Datagrams: {_runtime.recv_rate_hz:.1f} Hz")
-            box.label(text=f"Completed Frames: {_runtime.completed_frame_rate_hz:.1f} Hz / 60")
+            now = time.monotonic()
+            box.label(text=f"Received FPS: {frame_rate(_runtime.motion.received_times, now):.1f}")
+            box.label(text=f"Applied FPS: {frame_rate(_runtime.applied_times, now):.1f}")
             box.label(text=f"Queued Frames: {len(_runtime.ready_frames)}")
             box.label(text=f"Queued PointClouds: {len(_runtime.ready_pointclouds)}")
 
@@ -1800,8 +1669,12 @@ def register():
     for c in classes:
         bpy.utils.register_class(c)
     bpy.types.Scene.movin_props = PointerProperty(type=MOVIN_Props)
+    bpy.app.handlers.persistent(_before_file_load)
+    bpy.app.handlers.load_pre.append(_before_file_load)
 
 def unregister():
+    _stop_receiver()
+    bpy.app.handlers.load_pre.remove(_before_file_load)
     for c in reversed(classes):
         bpy.utils.unregister_class(c)
     if hasattr(bpy.types.Scene, "movin_props"):
