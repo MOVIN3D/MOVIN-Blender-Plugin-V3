@@ -1,7 +1,13 @@
 # MOVIN Blender Plugin
 
+**MOVIN Blender Plugin v3.3.0 supports motion and point cloud streaming from
+MOVIN Studio v3.0.0 and later.**
+
+Studio connection status, bone-mapping results, and FPS feedback require
+**MOVIN Studio v3.3.0 or later**.
+
 Blender add-on for receiving and previewing live MOVIN motion and point cloud OSC
-streams. Version **3.3.0** is intended for **MOVIN Studio 3.3.0**.
+streams.
 
 The add-on retains its Blender 4.3.2 minimum; this release is tested on Blender
 5.2.2 LTS. The included `.blend` samples are saved and tested in 5.2.2. Use that
