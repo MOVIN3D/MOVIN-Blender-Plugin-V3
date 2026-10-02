@@ -1,4 +1,4 @@
-# v3.3.1 validation — 2026-10-02
+# v3.3.0 reissue validation — 2026-10-02
 
 Validated on Windows with Blender 5.2.2 LTS using the installable ZIP and
 extracted samples, in an isolated Blender user directory.
@@ -6,7 +6,7 @@ extracted samples, in an isolated Blender user directory.
 - Python receiver and skeleton diagnostics: 57 tests passed, including clock
   rollback and frame-index restart regression coverage.
 - Plugin ZIP installation, enable and disable passed; installed source bytes
-  match `addon/movin_blender_plugin.py` and report version 3.3.1.
+  match `addon/movin_blender_plugin.py` and report version 3.3.0.
 - `verify_sample`, `verify_apply`, `verify_global_hips`, `verify_receiver` and
   `verify_diagnostics` passed on both packaged scenes using the installed add-on
   (10 runs, including real UDP motion, point cloud and Studio status checks).
@@ -15,13 +15,13 @@ extracted samples, in an isolated Blender user directory.
 
 | Artifact | SHA-256 |
 | --- | --- |
-| `MOVIN-Blender-Plugin-v3.3.1.zip` | `a1450646906e7318dd3896bc9bb2a23be50b54a6c37f2c7a0fe4da2338fd449a` |
-| `MOVIN-Blender-Samples-v3.3.1.zip` | `d4506c3aea5dadecfce39ef656f85a1b9d0034d7ae2cbf0410250015006b1746` |
+| `MOVIN-Blender-Plugin-v3.3.0.zip` | `64a9e0b2326c6fcd59bbfe449d16abbd89c7f7af4540a025f89380eee2f369bb` |
+| `MOVIN-Blender-Samples-v3.3.0.zip` | `e1ac50be2b7955e0cc481ddaac2bac76d6d1263c32f6d7b56df174dd0c3fd7be` |
 
-Packaged text uses LF line endings across checkouts. After normalization, the
-installed add-on and tested scene/model bytes are unchanged; only README and
-CHANGELOG line endings differ from the first tested sample ZIP. Final archive
-contents were compared with those extracted test inputs.
+Packaged text uses LF line endings across checkouts. The final v3.3.0 ZIPs were
+reinstalled and all 10 sample runs repeated after applying the reissue metadata.
+The earlier release metadata, tag and assets are backed up locally. This replaces
+v3.3.0 at the maintainer's explicit request; no v3.3.1 release was published.
 
 This patch does not repeat the earlier interactive FPS benchmark, visual sample
 review or mutation run. Older Blender versions, macOS and Linux were not tested.

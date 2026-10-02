@@ -1,10 +1,13 @@
 # MOVIN Blender Plugin
 
-**MOVIN Blender Plugin v3.3.1 supports motion and point cloud streaming from
+**MOVIN Blender Plugin v3.3.0 supports motion and point cloud streaming from
 MOVIN Studio v3.0.0 and later.**
 
 Studio connection status, bone-mapping results, and FPS feedback require
 **MOVIN Studio v3.3.0 or later**.
+
+**v3.3.0 was refreshed on 2026-10-02** to fix reception after a sender clock rollback.
+Use the current release checksums to identify this build and fully restart Blender after updating.
 
 Blender add-on for receiving and previewing live MOVIN motion and point cloud OSC
 streams.
@@ -41,7 +44,7 @@ models instead. Older Blender versions have not been revalidated for this releas
 
 ## Installation
 
-1. Download `MOVIN-Blender-Plugin-v3.3.1.zip` from the
+1. Download `MOVIN-Blender-Plugin-v3.3.0.zip` from the
    [release downloads](https://github.com/MOVIN3D/MOVIN-Blender-Plugin-V3/releases).
 2. In Blender, open `Edit > Preferences > Add-ons`.
 3. Open the menu at the top right and choose `Install from Disk...`
@@ -53,7 +56,7 @@ For an update, stop streaming, disable the old add-on, install the replacement,
 and fully restart Blender before enabling it again. Toggling the add-on alone
 can leave the previous Python module in memory.
 
-`MOVIN-Blender-Samples-v3.3.1.zip` is a separate download: extract it to a folder
+`MOVIN-Blender-Samples-v3.3.0.zip` is a separate download: extract it to a folder
 and open a scene under `samples/blend`. Do not install the samples ZIP as an
 add-on. Both scenes have their Armature and Hips Bone selected, port `11235`,
 point cloud preview enabled, and streaming stopped. They open in their rest

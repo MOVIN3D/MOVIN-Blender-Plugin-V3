@@ -1,6 +1,9 @@
 # Changelog
 
-## 3.3.1 — 2026-10-02
+## 3.3.0 — refreshed 2026-10-02
+
+Reissued at the maintainer's request. The version remains 3.3.0; use the current
+release checksums to identify this build.
 
 - Fix motion reception stopping after the sender's system clock moves backwards.
   Order frames by frame index and measure restart timeouts using monotonic time.
@@ -10,7 +13,7 @@
 
 Fully restart Blender after replacing the add-on to load the updated Python module.
 
-## 3.3.0 — 2026-10-01
+### Initial v3.3.0 distribution — 2026-10-01
 
 Align the plugin version with MOVIN Studio 3.3.0. The development add-on was
 labeled 1.1.0. This is the recommended release; the legacy `v3.0.0` tag
