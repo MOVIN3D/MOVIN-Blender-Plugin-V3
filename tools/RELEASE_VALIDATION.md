@@ -16,7 +16,12 @@ extracted samples, in an isolated Blender user directory.
 | Artifact | SHA-256 |
 | --- | --- |
 | `MOVIN-Blender-Plugin-v3.3.1.zip` | `a1450646906e7318dd3896bc9bb2a23be50b54a6c37f2c7a0fe4da2338fd449a` |
-| `MOVIN-Blender-Samples-v3.3.1.zip` | `e6d3286fa9b88c0b242af5f33e5469f11752cdc3925cbf8e92d8c2612addea39` |
+| `MOVIN-Blender-Samples-v3.3.1.zip` | `d4506c3aea5dadecfce39ef656f85a1b9d0034d7ae2cbf0410250015006b1746` |
+
+Packaged text uses LF line endings across checkouts. After normalization, the
+installed add-on and tested scene/model bytes are unchanged; only README and
+CHANGELOG line endings differ from the first tested sample ZIP. Final archive
+contents were compared with those extracted test inputs.
 
 This patch does not repeat the earlier interactive FPS benchmark, visual sample
 review or mutation run. Older Blender versions, macOS and Linux were not tested.
