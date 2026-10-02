@@ -1,7 +1,7 @@
 bl_info = {
     "name": "MOVIN Live Receiver",
     "author": "MOVIN",
-    "version": (3, 3, 1),
+    "version": (3, 3, 0),
     "blender": (4, 3, 2),
     "location": "View3D > N-Panel > MOVIN Live",
     "description": "Receives motion and point clouds from MOVIN Studio.",
