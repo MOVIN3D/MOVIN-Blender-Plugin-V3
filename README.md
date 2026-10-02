@@ -1,6 +1,6 @@
 # MOVIN Blender Plugin
 
-**MOVIN Blender Plugin v3.3.0 supports motion and point cloud streaming from
+**MOVIN Blender Plugin v3.3.1 supports motion and point cloud streaming from
 MOVIN Studio v3.0.0 and later.**
 
 Studio connection status, bone-mapping results, and FPS feedback require
@@ -41,7 +41,7 @@ models instead. Older Blender versions have not been revalidated for this releas
 
 ## Installation
 
-1. Download `MOVIN-Blender-Plugin-v3.3.0.zip` from the
+1. Download `MOVIN-Blender-Plugin-v3.3.1.zip` from the
    [release downloads](https://github.com/MOVIN3D/MOVIN-Blender-Plugin-V3/releases).
 2. In Blender, open `Edit > Preferences > Add-ons`.
 3. Open the menu at the top right and choose `Install from Disk...`
@@ -53,7 +53,7 @@ For an update, stop streaming, disable the old add-on, install the replacement,
 and fully restart Blender before enabling it again. Toggling the add-on alone
 can leave the previous Python module in memory.
 
-`MOVIN-Blender-Samples-v3.3.0.zip` is a separate download: extract it to a folder
+`MOVIN-Blender-Samples-v3.3.1.zip` is a separate download: extract it to a folder
 and open a scene under `samples/blend`. Do not install the samples ZIP as an
 add-on. Both scenes have their Armature and Hips Bone selected, port `11235`,
 point cloud preview enabled, and streaming stopped. They open in their rest
@@ -209,6 +209,9 @@ frames expire after 0.5 seconds and each stream retains at most eight partial
 frames. A restarted frame index is accepted after one second without a newer
 complete frame. Another UDP sender can take over after two seconds of inactivity.
 Motion and point-cloud sources are tracked independently.
+
+Frame ordering uses frame indices and local monotonic time. A sender system-clock
+correction does not block newer frames or recovery after a stream restart.
 
 `/MOVIN/Blender/Status/Request` takes `[token, replyPort]`, with a 32-digit hex
 token. Replies go to the requesting IP and echo the token. The response address

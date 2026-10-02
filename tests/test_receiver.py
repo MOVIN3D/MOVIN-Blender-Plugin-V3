@@ -37,6 +37,20 @@ class receiver_tests(unittest.TestCase):
         self.receive(motion(10, 1, 0, 1, [bone(0, -1, 'Root')]), 11.1)
         self.assertEqual([f['frame_idx'] for f in movin._runtime.ready_frames], [10])
 
+    def test_clock_rollback_does_not_block_new_frames_or_restart(self):
+        def send(index, stamp, now):
+            args = motion(index, 1, 0, 1, [bone(0, -1, 'Root')])
+            args[0] = stamp
+            self.receive(args, now)
+
+        send(100, '2026-10-01 12:00:00.000', 10.)
+        send(101, '2026-10-01 11:00:00.000', 10.1)
+        self.assertEqual(movin._runtime.ready_frames[-1]['frame_idx'], 101)
+        send(0, '2026-10-01 10:00:00.000', 10.2)
+        self.assertEqual(movin._runtime.ready_frames[-1]['frame_idx'], 101)
+        send(1, '2026-10-01 10:00:01.000', 11.2)
+        self.assertEqual([f['frame_idx'] for f in movin._runtime.ready_frames], [1])
+
     def test_motion_queue_keeps_only_two_newest_frames_during_stall(self):
         for index in range(1000):
             self.receive(motion(index, 1, 0, 1, [bone(0, -1, 'Root')]), 10. + index / 60)

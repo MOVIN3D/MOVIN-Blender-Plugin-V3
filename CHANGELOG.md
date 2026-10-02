@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.3.1 — 2026-10-02
+
+- Fix motion reception stopping after the sender's system clock moves backwards.
+  Order frames by frame index and measure restart timeouts using monotonic time.
+- Add regression coverage for clock rollback and restarted frame indices.
+- Keep the existing samples and Studio compatibility: motion and point clouds
+  support Studio 3.0.0+, while status and FPS feedback require Studio 3.3.0+.
+
+Fully restart Blender after replacing the add-on to load the updated Python module.
+
 ## 3.3.0 — 2026-10-01
 
 Align the plugin version with MOVIN Studio 3.3.0. The development add-on was
