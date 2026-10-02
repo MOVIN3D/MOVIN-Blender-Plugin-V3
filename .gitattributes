@@ -1,0 +1,4 @@
+# Keep packaged source and documentation identical across checkouts.
+addon/*.py text eol=lf
+README.md text eol=lf
+CHANGELOG.md text eol=lf
