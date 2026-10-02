@@ -1,7 +1,7 @@
 bl_info = {
     "name": "MOVIN Live Receiver",
     "author": "MOVIN",
-    "version": (3, 3, 0),
+    "version": (3, 3, 1),
     "blender": (4, 3, 2),
     "location": "View3D > N-Panel > MOVIN Live",
     "description": "Receives motion and point clouds from MOVIN Studio.",
@@ -467,7 +467,6 @@ class chunk_stream:
         self.sender = None
         self.last_frame = -1
         self.last_time = 0.0
-        self.last_stamp = ""
         self.received_times = deque(maxlen=240)
 
     def expire(self, now):
@@ -476,14 +475,12 @@ class chunk_stream:
 
     def add(self, sender, index, metadata, count, chunk, items, now):
         self.expire(now)
-        stamp = metadata.get("timestamp", "")
         same = sender == self.sender
         # A restarted index is accepted after one second without a newer frame.
         ordered = index > self.last_frame or (index < self.last_frame and now - self.last_time >= 1.0)
-        fresh = not stamp or not self.last_stamp or stamp >= self.last_stamp
         available = self.sender is None or same or now - self.last_time >= 2.0
         result = None
-        if available and (not same or (ordered and fresh)):
+        if available and (not same or ordered):
             key = (sender, index)
             buf = self.buffers.get(key)
             if buf is None:
@@ -526,7 +523,7 @@ class chunk_stream:
                         del self.buffers[old]
                 if "actor" not in metadata or (self.ready and self.ready[-1]["actor"] != metadata["actor"]):
                     self.ready.clear()
-                self.sender, self.last_frame, self.last_time, self.last_stamp = sender, index, now, stamp
+                self.sender, self.last_frame, self.last_time = sender, index, now
                 self.received_times.append(now)
                 result = dict(metadata, frame_idx=index, received_at=now)
                 result["bones" if "actor" in metadata else "points"] = joined

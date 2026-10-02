@@ -1,3 +1,27 @@
+# v3.3.1 validation — 2026-10-02
+
+Validated on Windows with Blender 5.2.2 LTS using the installable ZIP and
+extracted samples, in an isolated Blender user directory.
+
+- Python receiver and skeleton diagnostics: 57 tests passed, including clock
+  rollback and frame-index restart regression coverage.
+- Plugin ZIP installation, enable and disable passed; installed source bytes
+  match `addon/movin_blender_plugin.py` and report version 3.3.1.
+- `verify_sample`, `verify_apply`, `verify_global_hips`, `verify_receiver` and
+  `verify_diagnostics` passed on both packaged scenes using the installed add-on
+  (10 runs, including real UDP motion, point cloud and Studio status checks).
+- ZIP file lists, contents and SHA-256 checksums match their inputs. Sample
+  `.blend` and `.fbx` files are unchanged from v3.3.0. Development files are excluded.
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `MOVIN-Blender-Plugin-v3.3.1.zip` | `a1450646906e7318dd3896bc9bb2a23be50b54a6c37f2c7a0fe4da2338fd449a` |
+| `MOVIN-Blender-Samples-v3.3.1.zip` | `e6d3286fa9b88c0b242af5f33e5469f11752cdc3925cbf8e92d8c2612addea39` |
+
+This patch does not repeat the earlier interactive FPS benchmark, visual sample
+review or mutation run. Older Blender versions, macOS and Linux were not tested.
+The add-on retains its 4.3.2 minimum; prepared `.blend` samples require 5.2.2.
+
 # v3.3.0 validation — 2026-10-01
 
 Validated on Windows with Blender 5.2.2 LTS. This record covers the v3.3.0
