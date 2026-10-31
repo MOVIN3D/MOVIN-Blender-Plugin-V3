@@ -1,6 +1,10 @@
 """OSC boundary, frame ordering, restart, and bounded assembly regressions."""
 import struct
+import socket
+import threading
+from types import SimpleNamespace
 import unittest
+from unittest.mock import MagicMock, patch
 import test_skeleton_diagnostics  # Installs Blender import stubs.
 import movin_blender_plugin as movin
 
@@ -181,6 +185,116 @@ class receiver_tests(unittest.TestCase):
                     movin._receive_packet(packet('/MOVIN/PointCloud', [1, 1, 0, 1, 1, value, 0., 0.]),
                                           self.sender, 10.)
         self.assertFalse(movin._runtime.ready_pointclouds)
+
+
+class receiver_status_tests(unittest.TestCase):
+    def setUp(self):
+        movin._runtime.reset()
+        self.token = 'a' * 32
+        self.received = threading.Event()
+        self.sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sender.bind(('127.0.0.1', 0))
+        self.addCleanup(self.sender.close)
+        self.listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.listener.bind(('127.0.0.1', 0))
+        self.listener.settimeout(0.01)
+        self.listen_address = self.listener.getsockname()
+        self.addCleanup(self.listener.close)
+        scene = SimpleNamespace(movin_props=SimpleNamespace(armature_name=''))
+        data = SimpleNamespace(scenes={'Scene': scene}, objects={})
+        timers = SimpleNamespace(is_registered=lambda callback: False)
+        receive_packet = movin._receive_packet
+
+        def receive(data, sender, now):
+            receive_packet(data, sender, now)
+            self.received.set()
+
+        for p in (patch.object(movin.bpy, 'data', data),
+                  patch.object(movin.bpy.app, 'timers', timers),
+                  patch.object(movin, '_apply_latest_stream_data', return_value=1.0 / 120.0),
+                  patch.object(movin, '_receive_packet', side_effect=receive)):
+            p.start()
+            self.addCleanup(p.stop)
+        movin._runtime.sock = self.listener
+        movin._runtime.scene_name = 'Scene'
+        movin._runtime.running = True
+        movin._runtime.thread = threading.Thread(target=movin._udp_server_loop, args=(self.listener,), daemon=True)
+        movin._runtime.thread.start()
+        self.addCleanup(movin._stop_receiver)
+
+    def request(self, port):
+        self.received.clear()
+        self.sender.sendto(packet('/MOVIN/Blender/Status/Request', [self.token, port]), self.listen_address)
+        self.assertTrue(self.received.wait(1.0), 'Status request was not received')
+
+    def assert_motion_received(self):
+        self.received.clear()
+        self.sender.sendto(packet('/MOVIN/Frame', motion(0, 1, 0, 1, [bone(0, -1, 'Root')])),
+                           self.listen_address)
+        self.assertTrue(self.received.wait(1.0), 'Motion receiver stopped after a status reply')
+        self.assertEqual(movin._runtime.ready_frames[-1]['frame_idx'], 0)
+        self.assertTrue(movin._runtime.running)
+        self.assertTrue(movin._runtime.thread.is_alive())
+
+    def test_status_reply_uses_separate_socket_and_preserves_payload(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as reply:
+            reply.bind(('127.0.0.1', 0))
+            reply.settimeout(1.0)
+            self.request(reply.getsockname()[1])
+            self.assertIsNotNone(movin._timer_tick())
+            data, sender = reply.recvfrom(65535)
+        self.assertNotEqual(sender[1], self.listen_address[1])
+        address, args = movin._OscReader(data).read_message()
+        self.assertEqual(address, '/MOVIN/Blender/Status')
+        self.assertEqual(args, [self.token, 1, '', 0, 0, 0, 0., 0., 0., -1., -1., 0, 0, ''])
+        self.assert_motion_received()
+
+    def test_closed_status_port_allows_sender_restart_and_later_reply(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as closed:
+            closed.bind(('127.0.0.1', 0))
+            port = closed.getsockname()[1]
+        self.request(port)
+        self.assertIsNotNone(movin._timer_tick())
+        self.sender.close()
+        # Let the closed port's ICMP reply arrive and the status rate limit expire.
+        self.received.clear()
+        self.received.wait(0.3)
+        self.sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sender.bind(('127.0.0.1', 0))
+        self.addCleanup(self.sender.close)
+        self.assert_motion_received()
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as reply:
+            reply.bind(('127.0.0.1', 0))
+            reply.settimeout(1.0)
+            self.request(reply.getsockname()[1])
+            self.assertIsNotNone(movin._timer_tick())
+            data, _ = reply.recvfrom(65535)
+        self.assertEqual(movin._OscReader(data).read_message()[1][0], self.token)
+
+    def test_status_socket_creation_failure_is_reported_and_motion_continues(self):
+        self.request(self.sender.getsockname()[1])
+        error = OSError('Status socket unavailable')
+        with patch.object(movin.socket, 'socket', side_effect=error), patch('builtins.print') as report:
+            self.assertIsNotNone(movin._timer_tick())
+        report.assert_any_call('[MOVIN Live] Status reply failed:', error)
+        self.assertIs(movin._runtime.sock, self.listener)
+        self.assertIsNone(movin._runtime.status_request)
+        self.assertGreater(movin._runtime.status_sent, 0.0)
+        self.assertEqual(movin._runtime.socket_error, '')
+        self.assert_motion_received()
+
+    def test_status_send_failure_closes_reply_socket_and_motion_continues(self):
+        self.request(self.sender.getsockname()[1])
+        error = OSError('Status destination unavailable')
+        reply = MagicMock()
+        reply.__enter__.return_value = reply
+        reply.sendto.side_effect = error
+        with patch.object(movin.socket, 'socket', return_value=reply), patch('builtins.print') as report:
+            self.assertIsNotNone(movin._timer_tick())
+        report.assert_any_call('[MOVIN Live] Status reply failed:', error)
+        reply.__exit__.assert_called_once()
+        self.assertIs(movin._runtime.sock, self.listener)
+        self.assert_motion_received()
 
 
 if __name__ == '__main__':

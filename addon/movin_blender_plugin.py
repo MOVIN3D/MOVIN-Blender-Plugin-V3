@@ -1421,7 +1421,12 @@ def _timer_tick():
                 packet = osc_string("/MOVIN/Blender/Status") + osc_string(tags)
                 for tag, value in zip(tags[1:], args):
                     packet += osc_string(value) if tag == "s" else struct.pack(">" + tag, value)
-                _runtime.sock.sendto(packet, (sender[0], port))
+                try:
+                    # A closed reply port can reset the next receive on Windows.
+                    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as reply:
+                        reply.sendto(packet, (sender[0], port))
+                except OSError as e:
+                    print("[MOVIN Live] Status reply failed:", e)
             if interval is None:
                 _stop_receiver()
         except Exception as e:
